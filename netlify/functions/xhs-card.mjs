@@ -1,8 +1,8 @@
 /**
  * xhs-card.mjs —— 小红书笔记抓取与图片 Base64 转换服务（Netlify Function）
- * 版本：1.0.3
+ * 版本：1.0.4
  * 作者：言嘉
- * 描述：针对海外 IP 与反爬混淆页面，放弃 JSON.parse，改用暴力正则直接硬抠标题、正文、作者与图片 CDN。
+ * 描述：针对海外 IP 与短链协议问题，改用 PC UA 并手动拦截 302 重定向，防 xhsdiscover 协议导致 fetch 崩溃。
  */
 
 const CORS_HEADERS = {
@@ -38,22 +38,49 @@ export default async function handler(request, context) {
   }
 
   try {
-    const mobileUA =
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1";
+    const PC_UA =
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-    // 1. 发起请求并跟随重定向，带全 Referer 伪装
-    const pageRes = await fetch(targetUrl, {
-      headers: {
-        "User-Agent": mobileUA,
-        "Referer": "https://www.xiaohongshu.com/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Cache-Control": "no-cache",
-      },
-      redirect: "follow",
-    });
+    // 1. 手动追踪重定向，避免遇到 xhsdiscover:// 导致 node fetch 崩溃
+    let currentUrl = targetUrl;
+    let finalHtml = "";
+    let redirects = 0;
 
-    const html = await pageRes.text();
+    while (redirects < 5) {
+      redirects++;
+      const res = await fetch(currentUrl, {
+        headers: {
+          "User-Agent": PC_UA,
+          "Referer": "https://www.xiaohongshu.com/",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+          "Accept-Language": "zh-CN,zh;q=0.9",
+        },
+        redirect: "manual",
+      });
+
+      if ([301, 302, 307, 308].includes(res.status)) {
+        const loc = res.headers.get("location");
+        if (!loc) break;
+        if (loc.startsWith("xhsdiscover://")) {
+          const m = loc.match(/item\/([a-zA-Z0-9]+)/);
+          if (m && m[1]) {
+            currentUrl = `https://www.xiaohongshu.com/explore/${m[1]}`;
+            continue;
+          }
+        }
+        currentUrl = new URL(loc, currentUrl).href;
+        continue;
+      }
+
+      finalHtml = await res.text();
+      break;
+    }
+
+    if (!finalHtml) {
+      throw new Error(`未能获取到网页内容（最终尝试地址：${currentUrl}）`);
+    }
+
+    const html = finalHtml;
 
     // 2. 暴力正则提取：标题
     let title = "";
@@ -128,7 +155,7 @@ export default async function handler(request, context) {
 
           const imgRes = await fetch(fetchUrl, {
             headers: {
-              "User-Agent": mobileUA,
+              "User-Agent": PC_UA,
               "Referer": "https://www.xiaohongshu.com/",
             },
           });
@@ -161,10 +188,12 @@ export default async function handler(request, context) {
       { status: 200, headers: CORS_HEADERS }
     );
   } catch (err) {
+    const causeMsg = err.cause ? (err.cause.message || err.cause.code || String(err.cause)) : "";
     return new Response(
       JSON.stringify({
         ok: false,
         error: err.message || "抓取失败",
+        cause: causeMsg,
       }),
       { status: 500, headers: CORS_HEADERS }
     );
