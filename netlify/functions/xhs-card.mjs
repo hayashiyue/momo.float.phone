@@ -1,6 +1,8 @@
 /**
  * xhs-card.mjs —— 小红书笔记抓取与图片 Base64 转换服务（Netlify Function）
- * 供小手机「小红书伴读插件」同源直接调用。
+ * 版本：1.0.1
+ * 作者：言嘉
+ * 描述：支持抓取小红书正文、热评与最多 9 张图片，并转为 Base64 供多模态 AI 阅读。
  */
 
 const CORS_HEADERS = {
@@ -50,7 +52,7 @@ export default async function handler(request, context) {
         const rawJson = stateMatch[1].replace(/undefined/g, "null");
         stateData = JSON.parse(rawJson);
       } catch (e) {
-        // JSON 脏数据容错
+        // 容错处理
       }
     }
 
@@ -74,7 +76,7 @@ export default async function handler(request, context) {
         .filter(Boolean);
     }
 
-    // meta 标签降级容错
+    // meta 标签兜底
     if (!title) {
       const metaTitle = html.match(/<meta property="og:title" content="([^"]+)"/);
       title = metaTitle ? metaTitle[1] : "小红书笔记";
@@ -88,7 +90,7 @@ export default async function handler(request, context) {
       if (metaImg && metaImg[1]) rawImageUrls.push(metaImg[1]);
     }
 
-    // 提取前 5 条热评（若有）
+    // 提取热评（前 5 条）
     let comments = [];
     if (stateData && stateData.comment && stateData.comment.comments) {
       comments = stateData.comment.comments.slice(0, 5).map((c) => ({
@@ -98,30 +100,38 @@ export default async function handler(request, context) {
       }));
     }
 
-    // 3. 服务端并发拉取图片并转换为 Base64（限制最多转 3 张，绕过防盗链）
-    const imagesToFetch = rawImageUrls.slice(0, 3);
+    // 3. 服务端并发拉取最多 9 张图片并转为 Base64
+    const imagesToFetch = rawImageUrls.slice(0, 9);
     const images = [];
 
     await Promise.all(
       imagesToFetch.map(async (imgUrl) => {
         try {
-          const imgRes = await fetch(imgUrl, {
+          // CDN 智能瘦身：请求中等分辨率（宽 800px），画质足够 AI 识别，且体积控制在 100~200KB 内
+          let fetchUrl = imgUrl;
+          if (fetchUrl.includes("ci.xiaohongshu.com") || fetchUrl.includes("sns-img-qc.xhscdn.com")) {
+            if (!fetchUrl.includes("?")) {
+              fetchUrl += "?imageView2/2/w/800/format/jpg";
+            }
+          }
+
+          const imgRes = await fetch(fetchUrl, {
             headers: {
               "User-Agent": mobileUA,
               "Referer": "https://www.xiaohongshu.com/",
             },
           });
+
           if (imgRes.ok) {
-            const mime = imgRes.headers.get("content-type") || "image/jpeg";
             const buffer = await imgRes.arrayBuffer();
             const base64 = Buffer.from(buffer).toString("base64");
             images.push({
-              dataUrl: `data:${mime};base64,${base64}`,
+              dataUrl: `data:image/jpeg;base64,${base64}`,
               url: imgUrl,
             });
           }
         } catch (imgErr) {
-          // 单张图失败跳过
+          // 单张拉取失败跳过
         }
       })
     );
