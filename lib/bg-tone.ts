@@ -84,9 +84,22 @@ function firstGradientColor(backgroundImage: string): CssColor | null {
   return gradient ? parseCssColor(gradient) : null;
 }
 
-/** 采样图片上部 40% 区域（状态栏所在位置）的平均颜色。 */
+const sampledImageColorCache = new Map<string, RgbColor | null>();
+
+/** 采样图片上部 40% 区域（状态栏所在位置）的平均颜色（带缓存，避免 DOM 变化时反复解码大图导致 iOS OOM）。 */
 function sampleImageColor(url: string): Promise<RgbColor | null> {
+  if (sampledImageColorCache.has(url)) {
+    return Promise.resolve(sampledImageColorCache.get(url) ?? null);
+  }
   return new Promise((resolve) => {
+    const finish = (result: RgbColor | null) => {
+      if (sampledImageColorCache.size >= 40) {
+        const firstKey = sampledImageColorCache.keys().next().value;
+        if (firstKey !== undefined) sampledImageColorCache.delete(firstKey);
+      }
+      sampledImageColorCache.set(url, result);
+      resolve(result);
+    };
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
@@ -95,16 +108,18 @@ function sampleImageColor(url: string): Promise<RgbColor | null> {
       canvas.width = size;
       canvas.height = size;
       const ctx = canvas.getContext("2d");
-      if (!ctx) { resolve(null); return; }
+      if (!ctx) { finish(null); return; }
       ctx.drawImage(img, 0, 0, size, size);
       const sampleH = Math.round(size * 0.4);
       let data: Uint8ClampedArray;
       try {
         data = ctx.getImageData(0, 0, size, sampleH).data;
       } catch {
-        resolve(null);
+        finish(null);
         return;
       }
+      canvas.width = 0;
+      canvas.height = 0;
       let red = 0;
       let green = 0;
       let blue = 0;
@@ -116,9 +131,9 @@ function sampleImageColor(url: string): Promise<RgbColor | null> {
         blue += (data[i + 2] * alpha) + (255 * (1 - alpha));
         weight += 1;
       }
-      resolve(weight > 0 ? { r: red / weight, g: green / weight, b: blue / weight } : null);
+      finish(weight > 0 ? { r: red / weight, g: green / weight, b: blue / weight } : null);
     };
-    img.onerror = () => resolve(null);
+    img.onerror = () => finish(null);
     img.src = url;
   });
 }

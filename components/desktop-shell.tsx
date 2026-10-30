@@ -4634,8 +4634,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                                 : undefined
                             }
                           >
-                            {/* Render widgets for this page */}
-                            {pageWidgets.map((widget) => {
+                            {/* Render widgets for this page (unmount heavy widget DOM/iframes while inside an App to prevent iOS WebKit OOM) */}
+                            {!activeApp && pageWidgets.map((widget) => {
                               const wDragging = dragItem?.type === "widget" && dragItem.id === widget.id;
                               return (
                                 <div

@@ -1022,6 +1022,18 @@
   color: var(--c-text-title);
 }
 
+.chat-bubble-role-user,
+.chat-bubble-role-assistant,
+.chat-bubble-role-user *,
+.chat-bubble-role-assistant *,
+.chat-sys-msg,
+.chat-offline-text,
+.chat-offline-text * {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* ── Context menu ── */
 .ctx-menu {
   background: var(--ctx-menu-bg, #2c2c2c);

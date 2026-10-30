@@ -188,13 +188,8 @@ export const PhoneChatApp = memo(function PhoneChatApp({ onClose, initialSession
         if (activeSession) {
             setActiveMascot(false);
             setVisitedSessions(prev => {
-                const next = new Map<string, ChatSession>();
-                for (const [id, sess] of prev.entries()) {
-                    if (id === activeSession.id) continue;
-                    if (kvGet(`chat-generating:${id}`)) {
-                        next.set(id, sess);
-                    }
-                }
+                if (prev.has(activeSession.id)) return prev;
+                const next = new Map(prev);
                 next.set(activeSession.id, activeSession);
                 return next;
             });

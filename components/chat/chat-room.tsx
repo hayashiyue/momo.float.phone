@@ -1489,14 +1489,23 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         setActiveOfflineTarget(target);
     };
 
-    const getContextMenuInitialStyle = () => {
-        const anchor = contextMenuAnchor;
-        if (!anchor) return { left: 0, top: 0 };
-        return { left: anchor.x, top: Math.max(8, anchor.y - 90) };
+    const contextMenuAnchorRef = useRef<ContextMenuAnchor | null>(null);
+    contextMenuAnchorRef.current = contextMenuAnchor;
+
+    const getContextMenuInitialStyle = (): React.CSSProperties => {
+        const anchor = contextMenuAnchorRef.current;
+        if (!anchor) return { left: 8, top: 8 };
+        const vw = typeof window !== "undefined" ? window.innerWidth : 390;
+        const vh = typeof window !== "undefined" ? window.innerHeight : 844;
+        return {
+            left: Math.max(8, Math.min(anchor.x - 110, vw - 228)),
+            top: Math.max(8, Math.min(anchor.y - 76, vh - 96)),
+        };
     };
 
-    const positionFloatingContextMenu = (el: HTMLDivElement | null) => {
-        if (!el || !contextMenuAnchor) return;
+    const positionFloatingContextMenu = useCallback((el: HTMLDivElement | null) => {
+        const anchor = contextMenuAnchorRef.current;
+        if (!el || !anchor) return;
         const margin = 8;
         const gap = 12;
         const anchor = contextMenuAnchor;
@@ -1531,7 +1540,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 tri.style.borderTop = "6px solid var(--ctx-menu-bg, #2c2c2c)";
             }
         }
-    };
+    }, [contextMenuAnchor]);
 
     // --- Music action queue: send music operations as system messages ---
     useEffect(() => {
@@ -5114,10 +5123,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         // Prevent right click from triggering the timer, as it has its own context menu handler
         if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-        // 仅鼠标阻止默认选区；触摸设备在 pointerdown 上调用 preventDefault 会导致部分移动端手势异常
-        if (e.pointerType === 'mouse') {
-            e.preventDefault();
-        }
+        // 阻止 iOS 触发原生文本长按菜单/放大镜导致 pointercancel 打断长按计时
+        e.preventDefault();
 
         const anchor = { x: e.clientX, y: e.clientY };
         startPosRef.current = anchor;
