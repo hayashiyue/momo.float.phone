@@ -1121,7 +1121,96 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [draftTheme, setDraftTheme] = useState<ThemeProfile>(() => initialThemeProfile ?? readInitialThemeProfile());
   useEffect(() => {
     activeAppRef.current = activeApp;
+    if (!activeApp) {
+      returnMaskRef.current?.classList.remove("is-pending");
+    }
   }, [activeApp]);
+
+  // 改动 ⑤：返回时「正在返回…」等待遮罩
+  // 在按下返回按钮的 pointerdown 捕获阶段挂 is-pending（CSS transition-delay: 220ms 跑在合成器线程）；
+  // click 后双 rAF 判定：若主线程被桌面/列表切换占住，两帧后 App 已关，由上面的 activeApp effect 收起；
+  // 若 App 仍开着（应用内返回/手指滑开）则立即收回（尚未到 220ms 延迟，不会闪）。
+  // 另配 400ms / 1200ms / 10s 三层墙上时钟兜底，防后台标签页 rAF 不触发导致遮罩滞留。
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    let wallTimer400 = 0;
+    let wallTimer1200 = 0;
+    let wallTimer10s = 0;
+    let raf1 = 0;
+    let raf2 = 0;
+    let pending = false;
+
+    const clearTimers = () => {
+      if (wallTimer400) { window.clearTimeout(wallTimer400); wallTimer400 = 0; }
+      if (wallTimer1200) { window.clearTimeout(wallTimer1200); wallTimer1200 = 0; }
+      if (wallTimer10s) { window.clearTimeout(wallTimer10s); wallTimer10s = 0; }
+      if (raf1) { window.cancelAnimationFrame(raf1); raf1 = 0; }
+      if (raf2) { window.cancelAnimationFrame(raf2); raf2 = 0; }
+    };
+
+    const hideMask = () => {
+      pending = false;
+      clearTimers();
+      returnMaskRef.current?.classList.remove("is-pending");
+    };
+
+    const isBackButton = (target: EventTarget | null): boolean => {
+      if (!(target instanceof Element)) return false;
+      const btn = target.closest("button, [role='button']");
+      if (!btn) return false;
+      const label = (btn.getAttribute("aria-label") || btn.getAttribute("title") || "").trim();
+      if (label === "返回" || label === "关闭" || label === "返回桌面" || label.startsWith("关闭") || label.startsWith("返回")) {
+        return true;
+      }
+      return false;
+    };
+
+    const onPointerDownCapture = (e: PointerEvent) => {
+      if (!activeAppRef.current) return;
+      if (!isBackButton(e.target)) return;
+      clearTimers();
+      pending = true;
+      returnMaskRef.current?.classList.add("is-pending");
+      // 手指按住未触发 click（如滑开取消）1200ms 兜底，以及 10s 绝对上限兜底
+      wallTimer1200 = window.setTimeout(() => {
+        if (pending) hideMask();
+      }, 1200);
+      wallTimer10s = window.setTimeout(hideMask, 10000);
+    };
+
+    const onPointerCancelCapture = () => {
+      if (!pending) return;
+      wallTimer400 = window.setTimeout(hideMask, 400);
+    };
+
+    const onClickCapture = (e: MouseEvent) => {
+      if (!pending) return;
+      if (!isBackButton(e.target)) {
+        hideMask();
+        return;
+      }
+      if (wallTimer1200) { window.clearTimeout(wallTimer1200); wallTimer1200 = 0; }
+      raf1 = window.requestAnimationFrame(() => {
+        raf1 = 0;
+        raf2 = window.requestAnimationFrame(() => {
+          raf2 = 0;
+          hideMask();
+        });
+      });
+      wallTimer1200 = window.setTimeout(hideMask, 1200);
+    };
+
+    shell.addEventListener("pointerdown", onPointerDownCapture, true);
+    shell.addEventListener("pointercancel", onPointerCancelCapture, true);
+    shell.addEventListener("click", onClickCapture, true);
+    return () => {
+      clearTimers();
+      shell.removeEventListener("pointerdown", onPointerDownCapture, true);
+      shell.removeEventListener("pointercancel", onPointerCancelCapture, true);
+      shell.removeEventListener("click", onClickCapture, true);
+    };
+  }, []);
   // Listen for theme CSS updates from 小卷
   useEffect(() => {
     const onThemeUpdate = () => {
@@ -1160,6 +1249,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [slotIconHeight, setSlotIconHeight] = useState<number | null>(null);
   const [slotRowStep, setSlotRowStep] = useState<number | null>(null);
   const shellRef = useRef<HTMLDivElement | null>(null);
+  const returnMaskRef = useRef<HTMLDivElement | null>(null);
   const glassBusyTimerRef = useRef<number>(0);
   const iconGridRef = useRef<HTMLElement | null>(null);
   const swipeRef = useRef<{
@@ -4508,13 +4598,15 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
 
 
-                {!activeApp ? (
-                  <>
-                    <div
-                      ref={swipeLayerRef}
-                      className="phone-swipe-layer"
-                      style={{ "--swipe-page": boundedCurrentPageIndex } as CSSProperties}
-                    >
+                {/* 改动 ①：桌面图标层与分页圆点常驻挂载，App 打开时由 .phone-desktop-layer display:none 隐藏，
+                    消除退出 App 时重挂 30+ 层 backdrop-filter 毛玻璃与图标皮肤图的 0.5~0.6s 阻塞 */}
+                <div
+                  ref={swipeLayerRef}
+                  className="phone-swipe-layer phone-desktop-layer"
+                  inert={Boolean(activeApp)}
+                  aria-hidden={Boolean(activeApp) || undefined}
+                  style={{ "--swipe-page": boundedCurrentPageIndex } as CSSProperties}
+                >
                       {pageKeys.map((pageKey, pageIndex) => {
                         const pageNum = getDesktopPageNumber(pageKey) || pageIndex + 1;
                         const pageIcons = layout[pageKey] ?? [];
@@ -4703,19 +4795,22 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       })}
                     </div>
 
-                    <div className="page-controls">
-                      {pageKeys.map((pageKey, pageIndex) => (
-                        <button
-                          key={pageKey}
-                          type="button"
-                          className={boundedCurrentPageIndex === pageIndex ? "dot active dot-btn" : "dot dot-btn"}
-                          aria-label={`第${pageIndex + 1}页`}
-                          onClick={() => setCurrentPageIndex(pageIndex)}
-                        />
-                      ))}
-                    </div>
-                  </>
-                ) : (
+                <div
+                  className="page-controls phone-desktop-layer"
+                  inert={Boolean(activeApp)}
+                  aria-hidden={Boolean(activeApp) || undefined}
+                >
+                  {pageKeys.map((pageKey, pageIndex) => (
+                    <button
+                      key={pageKey}
+                      type="button"
+                      className={boundedCurrentPageIndex === pageIndex ? "dot active dot-btn" : "dot dot-btn"}
+                      aria-label={`第${pageIndex + 1}页`}
+                      onClick={() => setCurrentPageIndex(pageIndex)}
+                    />
+                  ))}
+                </div>
+                {activeApp ? (
                   <>
                     <section className="phone-app-pane" style={activeApp === "dwelling" || activeApp === "xiaohongshu" || activeApp === "shopping" ? { display: "none" } : undefined}>
                       {renderAppBody()}
@@ -4731,7 +4826,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       </section>
                     )}
                   </>
-                )}
+                ) : null}
                 {xiaohongshuMounted && (
                   <section className="phone-app-pane" style={activeApp !== "xiaohongshu" ? { display: "none" } : undefined}>
                     <XiaohongshuApp
@@ -4765,16 +4860,17 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
               </div>
 
-              {!activeApp ? (
-                <footer
-                  ref={dockElRef}
-                  className={editMode ? "dock edit-mode" : "dock"}
-                  {...(dockSkinUrl ? { "data-skinned": "" } : {})}
-                  style={{ "--dock-count": Math.max(1, dock.length) } as CSSProperties}
-                  onPointerMove={handleSwipeMove}
-                  onPointerUp={handleSwipeEnd}
-                  onPointerCancel={handleSwipeEnd}
-                >
+              <footer
+                ref={dockElRef}
+                className={`${editMode ? "dock edit-mode" : "dock"} phone-desktop-layer`}
+                inert={Boolean(activeApp)}
+                aria-hidden={Boolean(activeApp) || undefined}
+                {...(dockSkinUrl ? { "data-skinned": "" } : {})}
+                style={{ "--dock-count": Math.max(1, dock.length) } as CSSProperties}
+                onPointerMove={handleSwipeMove}
+                onPointerUp={handleSwipeEnd}
+                onPointerCancel={handleSwipeEnd}
+              >
                   {dockSkinUrl && (
                     <span className="dock-skin-layer" style={{ backgroundImage: `url("${dockSkinUrl}")` }} />
                   )}
@@ -4833,8 +4929,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       </button>
                     );
                   })}
-                </footer>
-              ) : null}
+              </footer>
+              <div ref={returnMaskRef} className="phone-return-mask" aria-hidden="true">
+                <div className="phone-return-pill">正在返回…</div>
+              </div>
               <DebugPromptPanel />
               <QuickActionFloat />
               <MascotFloat />

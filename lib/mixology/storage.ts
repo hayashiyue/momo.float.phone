@@ -70,11 +70,26 @@ export function getMixBuiltin(id: string): MixMaterial | null {
     return listMixBuiltins().find((m) => m.id === id) ?? null;
 }
 
+/**
+ * 按原始字符串同一性命中的解析备忘：
+ * 14MB 量级的对局/酒柜 JSON 在进入对局、槽位解析、列表刷新时会被连续读取二十余次，
+ * 只要底层 kvGet 返回的还是同一份字符串引用，直接复用上次解析结果；写入时立即失效。
+ */
+const jsonReadMemo = new Map<string, { raw: string; value: unknown }>();
+
 function readJson<T>(key: string, fallback: T): T {
     const raw = kvGet(key);
-    if (!raw) return fallback;
+    if (!raw) {
+        jsonReadMemo.delete(key);
+        return fallback;
+    }
+    const hit = jsonReadMemo.get(key);
+    if (hit && hit.raw === raw) {
+        return (hit.value ?? fallback) as T;
+    }
     try {
         const parsed = JSON.parse(raw);
+        jsonReadMemo.set(key, { raw, value: parsed });
         return (parsed ?? fallback) as T;
     } catch {
         return fallback;
@@ -82,7 +97,10 @@ function readJson<T>(key: string, fallback: T): T {
 }
 
 function writeJson(key: string, value: unknown): void {
-    kvSet(key, JSON.stringify(value));
+    jsonReadMemo.delete(key);
+    const raw = JSON.stringify(value);
+    kvSet(key, raw);
+    jsonReadMemo.set(key, { raw, value });
 }
 
 // ---------- 创作者资料 ----------

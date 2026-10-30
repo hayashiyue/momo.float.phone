@@ -218,11 +218,19 @@ function preloadImageDataUrl(url: string): Promise<void> {
   });
 }
 
+const FIRST_PAINT_PRELOAD_TIMEOUT_MS = 1500;
+
 async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme> {
   const profile = readThemeProfile();
   const assetIds = collectFirstPaintThemeAssetIds(profile);
-  const assets = assetIds.length ? await getThemeAssetMap(assetIds) : {};
-  await Promise.all(Object.values(assets).map(preloadImageDataUrl));
+  let assets: Record<string, string> = {};
+  await Promise.race([
+    (async () => {
+      assets = assetIds.length ? await getThemeAssetMap(assetIds) : {};
+      await Promise.all(Object.values(assets).map(preloadImageDataUrl));
+    })(),
+    wait(FIRST_PAINT_PRELOAD_TIMEOUT_MS),
+  ]);
   return { profile, assets };
 }
 

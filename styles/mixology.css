@@ -1324,6 +1324,104 @@
     color: var(--mix-violet);
 }
 
+.mix-load-newer-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 14px auto 8px;
+    flex-wrap: wrap;
+}
+
+.mix-load-newer-bar .mix-load-more {
+    margin: 0;
+}
+
+.mix-load-latest {
+    background: rgba(141, 123, 245, 0.2);
+    color: var(--mix-violet);
+    font-weight: 600;
+}
+
+.mix-user-turn[data-jump-highlight="true"],
+.mix-assistant-turn[data-jump-highlight="true"] {
+    border-radius: 12px;
+    box-shadow: 0 0 0 1.5px rgba(217, 176, 106, 0.65), 0 0 18px rgba(217, 176, 106, 0.18);
+    transition: box-shadow 0.35s ease;
+}
+
+.mix-jump-sheet {
+    width: 268px;
+    max-height: 340px;
+    display: flex;
+    flex-direction: column;
+    padding: 12px;
+}
+
+.mix-jump-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--mix-text);
+    margin-bottom: 8px;
+}
+
+.mix-jump-latest-btn {
+    border: none;
+    border-radius: 999px;
+    padding: 3px 9px;
+    font-size: 11px;
+    background: rgba(141, 123, 245, 0.22);
+    color: var(--mix-violet);
+    cursor: pointer;
+}
+
+.mix-jump-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.mix-jump-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--mix-dim);
+    text-align: left;
+    cursor: pointer;
+}
+
+.mix-jump-item[data-in-window="true"] {
+    border-color: rgba(141, 123, 245, 0.38);
+    background: rgba(141, 123, 245, 0.12);
+}
+
+.mix-jump-item b {
+    font-size: 11px;
+    color: var(--mix-gold);
+    font-weight: 600;
+}
+
+.mix-jump-item span {
+    font-size: 11.5px;
+    color: var(--mix-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+}
+
 /* AI 正文：无气泡全宽，左右对称 */
 .mix-prose {
     margin: 14px 0;

@@ -208,11 +208,18 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
      */
     const stickRef = useRef<"top" | "bottom" | "free">("bottom");
     /**
-     * 懒加载：收起的更早轮次数（从头数）。记"收起几条"而不是"露出几条"：
-     * 回溯把后面的轮次砍掉时，收起的那些不会因此从顶上冒出来把画面往下推——
-     * 用户正停在被回溯的那一轮上，iOS 没有 scroll anchoring，顶上一长就跳走了。
+     * 懒加载双闸门（改动 ③ & ④）：
+     * · hiddenTurnCount：头部收起的更早轮次数（初值必须在首帧渲染前就按 MIX_INITIAL_TURNS 算好，避免首帧全量渲染再收拢）；
+     * · hiddenTailCount：尾部收起的更新轮次数（跳转到早期轮次时只渲染目标附近 12 条，未渲染的后文记入尾部收起数）。
      */
-    const [hiddenTurnCount, setHiddenTurnCount] = useState(0);
+    const [hiddenTurnCount, setHiddenTurnCount] = useState(() =>
+        Math.max(0, (session?.turns.length ?? 0) - MIX_INITIAL_TURNS)
+    );
+    const [hiddenTailCount, setHiddenTailCount] = useState(0);
+    const [jumpHighlightTurnId, setJumpHighlightTurnId] = useState<string | null>(null);
+    const [jumpPickerOpen, setJumpPickerOpen] = useState(false);
+    const pendingScrollBottomRef = useRef(false);
+    const jumpTimerRef = useRef<number>(0);
     /**
      * 展开更早的轮次后，把原来最上面那条钉在屏幕上原来的位置：新插进来的轮次里
      * 小票/小剧场 iframe 是异步报高的，头一两秒内容会连着长高几次，每次报高都按锚点重落一次，
@@ -518,6 +525,8 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         loadMoreAnchorRef.current = null;
         const entered = getMixSession(sessionId);
         setHiddenTurnCount(Math.max(0, (entered?.turns.length ?? 0) - MIX_INITIAL_TURNS));
+        setHiddenTailCount(0);
+        setJumpHighlightTurnId(null);
         stickRef.current = (entered?.turns ?? []).some((turn) => turn.role === "user") ? "bottom" : "top";
         applyStick();
         const timer = window.setTimeout(() => {
@@ -583,20 +592,97 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
     }, []);
     useLayoutEffect(() => { restoreLoadMoreAnchor(); }, [hiddenTurnCount, restoreLoadMoreAnchor]);
 
+    /** 展开更新的一批（尾部闸门按批放开，首行不被挪动） */
+    const loadNewerTurns = useCallback(() => {
+        stickRef.current = "free";
+        setHiddenTailCount((tail) => Math.max(0, tail - MIX_LOAD_MORE_TURNS));
+    }, []);
+
+    /** 回到最新：同时清尾 + 收头，再由 layout effect 等 DOM 渲染出后钉一次落点 */
+    const returnToLatestTurns = useCallback(() => {
+        const total = session?.turns.length ?? 0;
+        loadMoreAnchorRef.current = null;
+        stickRef.current = "bottom";
+        pendingScrollBottomRef.current = true;
+        setHiddenTailCount(0);
+        setHiddenTurnCount(Math.max(0, total - MIX_INITIAL_TURNS));
+    }, [session?.turns.length]);
+
+    useLayoutEffect(() => {
+        if (!pendingScrollBottomRef.current) return;
+        pendingScrollBottomRef.current = false;
+        applyStick();
+    }, [hiddenTurnCount, hiddenTailCount, applyStick]);
+
     /**
-     * 轮数变了跟着修正收起数：
-     * · 变少（回溯/撤回）：只保证还露着几条，不多露——不然顶上冒出旧轮次把画面推下去；
-     * · 变多（新一轮到了）且正贴着底：把顶上多出来的收掉，常驻的 iframe 数量不随长局增长。
+     * 改动 ④：跳转到指定轮次（两头有界窗口，总共只渲 MIX_INITIAL_TURNS = 12 条）
+     * · 目标已在当前渲染窗口内：直接平滑滚动 + 高亮，不动窗口；
+     * · 目标在窗口外：把窗口搬到目标处（目标前留 2 条、总共 12 条），延迟 260ms 等 DOM 落定再滚并高亮。
+     */
+    const jumpToTurnIndex = useCallback((targetIndex: number) => {
+        const turns = session?.turns ?? [];
+        const total = turns.length;
+        if (targetIndex < 0 || targetIndex >= total) return;
+        const targetTurn = turns[targetIndex];
+        if (!targetTurn) return;
+        setJumpPickerOpen(false);
+        loadMoreAnchorRef.current = null;
+        stickRef.current = "free";
+
+        const windowEnd = total - hiddenTailCount;
+        const inCurrentWindow = targetIndex >= hiddenTurnCount && targetIndex < windowEnd;
+        if (jumpTimerRef.current) { window.clearTimeout(jumpTimerRef.current); jumpTimerRef.current = 0; }
+
+        const highlightAndScroll = (smooth: boolean) => {
+            const el = scrollRef.current;
+            const row = el?.querySelector<HTMLElement>(`[data-turn-id="${targetTurn.id}"]`);
+            if (el && row) {
+                row.scrollIntoView({ behavior: smooth ? "smooth" : "auto", block: "center" });
+                lastTopRef.current = el.scrollTop;
+            }
+            setJumpHighlightTurnId(targetTurn.id);
+            window.setTimeout(() => {
+                setJumpHighlightTurnId((cur) => (cur === targetTurn.id ? null : cur));
+            }, 1400);
+        };
+
+        if (inCurrentWindow) {
+            highlightAndScroll(true);
+            return;
+        }
+
+        const nextHead = Math.max(0, Math.min(targetIndex - 2, Math.max(0, total - MIX_INITIAL_TURNS)));
+        const nextEnd = Math.min(total, nextHead + MIX_INITIAL_TURNS);
+        const nextTail = Math.max(0, total - nextEnd);
+        setHiddenTurnCount(nextHead);
+        setHiddenTailCount(nextTail);
+        jumpTimerRef.current = window.setTimeout(() => {
+            jumpTimerRef.current = 0;
+            highlightAndScroll(true);
+        }, 260);
+    }, [session?.turns, hiddenTurnCount, hiddenTailCount]);
+
+    /**
+     * 轮数变了跟着修正收起数（头部 + 尾部双闸门钳位）：
+     * · 贴底/跟随最新状态下：强制 hiddenTailCount 归零，否则新回合不会长出来；
+     * · 变少（回溯/撤回）：保证至少露出 MIX_MIN_VISIBLE_TURNS 条。
      */
     const turnCount = session?.turns.length ?? 0;
     useLayoutEffect(() => {
-        setHiddenTurnCount((hidden) => {
-            const maxHidden = Math.max(0, turnCount - MIX_MIN_VISIBLE_TURNS);
-            if (hidden > maxHidden) return maxHidden;
-            if (stickRef.current === "bottom") return Math.max(hidden, turnCount - MIX_INITIAL_TURNS);
-            return hidden;
+        if (stickRef.current === "bottom") {
+            setHiddenTailCount((tail) => (tail !== 0 ? 0 : tail));
+            setHiddenTurnCount(Math.max(0, turnCount - MIX_INITIAL_TURNS));
+            return;
+        }
+        setHiddenTailCount((tail) => {
+            const maxTail = Math.max(0, turnCount - MIX_MIN_VISIBLE_TURNS);
+            return tail > maxTail ? maxTail : tail;
         });
-    }, [turnCount]);
+        setHiddenTurnCount((hidden) => {
+            const maxHidden = Math.max(0, turnCount - hiddenTailCount - MIX_MIN_VISIBLE_TURNS);
+            return hidden > maxHidden ? maxHidden : hidden;
+        });
+    }, [turnCount, hiddenTailCount]);
 
     /**
      * 用户自己翻页了就撒手，别在画布撑高时把他拽回去。
@@ -629,7 +715,10 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
         else applyStick();
     }, [applyStick]);
 
-    useEffect(() => () => abortRef.current?.abort(), []);
+    useEffect(() => () => {
+        abortRef.current?.abort();
+        if (jumpTimerRef.current) window.clearTimeout(jumpTimerRef.current);
+    }, []);
 
     // 进对局：还没开口的局用当前角色卡重取开场白。
     // 开场白是建局时写死进 turns[0] 的一条消息，作者改完卡回来本来看不到新的那句；
@@ -1063,6 +1152,18 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         {layout.icon || "◈"}
                     </button>
                 ))}
+                {session.turns.length > MIX_INITIAL_TURNS ? (
+                    <button
+                        type="button"
+                        className="mix-icon-btn"
+                        data-on={jumpPickerOpen ? "true" : undefined}
+                        onClick={() => setJumpPickerOpen((v) => !v)}
+                        aria-label="跳转轮次"
+                        title="跳转轮次"
+                    >
+                        <History size={18} />
+                    </button>
+                ) : null}
                 <button type="button" className="mix-icon-btn" onClick={() => setBgTuneOpen((v) => !v)} aria-label="背景观感" title="背景观感">
                     <Sun size={19} />
                 </button>
@@ -1070,6 +1171,39 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                     <MoreHorizontal size={20} />
                 </button>
             </div>
+            {jumpPickerOpen ? (
+                <>
+                    <div className="mix-bgtune-mask" onClick={() => setJumpPickerOpen(false)} />
+                    <div className="mix-bgtune mix-jump-sheet" data-window-key={`${hiddenTurnCount}-${hiddenTailCount}-${session.turns.length}`}>
+                        <div className="mix-jump-head">
+                            <span>跳转轮次（共 {session.turns.length} 条）</span>
+                            {hiddenTailCount > 0 ? (
+                                <button type="button" className="mix-jump-latest-btn" onClick={() => { setJumpPickerOpen(false); returnToLatestTurns(); }}>
+                                    回到最新
+                                </button>
+                            ) : null}
+                        </div>
+                        <div className="mix-jump-list">
+                            {session.turns.map((t, idx) => {
+                                const inWin = idx >= hiddenTurnCount && idx < session.turns.length - hiddenTailCount;
+                                const preview = t.text.replace(/\s+/g, " ").trim().slice(0, 26) || (t.role === "user" ? "（发言）" : "（回复）");
+                                return (
+                                    <button
+                                        key={t.id}
+                                        type="button"
+                                        className="mix-jump-item"
+                                        data-in-window={inWin ? "true" : undefined}
+                                        onClick={() => jumpToTurnIndex(idx)}
+                                    >
+                                        <b>#{idx + 1} · {t.role === "user" ? "我" : session.charName}</b>
+                                        <span>{preview}</span>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    </div>
+                </>
+            ) : null}
             {bgTuneOpen ? (
                 <>
                     <div className="mix-bgtune-mask" onClick={() => setBgTuneOpen(false)} />
@@ -1162,9 +1296,10 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         查看更早的 {Math.min(MIX_LOAD_MORE_TURNS, hiddenTurnCount)} 条 · 还有 {hiddenTurnCount} 条
                     </button>
                 ) : null}
-                {session.turns.slice(hiddenTurnCount).map((turn, offset) => {
+                {session.turns.slice(hiddenTurnCount, Math.max(hiddenTurnCount, session.turns.length - hiddenTailCount)).map((turn, offset) => {
                     const idx = hiddenTurnCount + offset;
                     const isLast = idx === session.turns.length - 1;
+                    const isHighlighted = jumpHighlightTurnId === turn.id;
                     const actions = (
                         <TurnActions
                             align={turn.role === "user" ? "right" : "left"}
@@ -1177,12 +1312,12 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         />
                     );
                     return turn.role === "user" ? (
-                        <div className="mix-user-turn" data-with-actions="true" data-turn-id={turn.id} key={turn.id}>
+                        <div className="mix-user-turn" data-with-actions="true" data-jump-highlight={isHighlighted ? "true" : undefined} data-turn-id={turn.id} key={turn.id}>
                             <div className="mix-user-bubble">{turn.text}</div>
                             {actions}
                         </div>
                     ) : (
-                        <div className="mix-assistant-turn" key={turn.id} data-turn={turn.id} data-turn-id={turn.id}>
+                        <div className="mix-assistant-turn" key={turn.id} data-turn={turn.id} data-jump-highlight={isHighlighted ? "true" : undefined} data-turn-id={turn.id}>
                             <AssistantTurn turn={turn} ticketFrames={turnTicketFrames(turn)} encoreFrames={turnEncoreFrames(turn)} filterRules={assets.filterRules} state={turn.state} dialogue={dialogueFor(turn.id)} />
                             {/* 信任模式机括的坑位：prose 拿这一轮的正文容器本身，turn 在正文下方给一块 */}
                             {trustedBase ? trustedMechanisms.map((material) => {
@@ -1200,6 +1335,16 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
                         </div>
                     );
                 })}
+                {hiddenTailCount > 0 ? (
+                    <div className="mix-load-newer-bar">
+                        <button type="button" className="mix-load-more" onClick={loadNewerTurns}>
+                            查看更新的 {Math.min(MIX_LOAD_MORE_TURNS, hiddenTailCount)} 条 · 还有 {hiddenTailCount} 条
+                        </button>
+                        <button type="button" className="mix-load-more mix-load-latest" onClick={returnToLatestTurns}>
+                            回到最新
+                        </button>
+                    </div>
+                ) : null}
                 {busy ? (() => {
                     // 流式过程中同样过一遍「仅显示」滤网，写出来的样子和落库后一致
                     const shown = applyMixFilterRules(mixStreamText(live), assets.filterRules, "display");

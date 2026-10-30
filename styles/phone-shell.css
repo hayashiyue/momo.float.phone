@@ -150,7 +150,7 @@
   background-repeat: no-repeat;
   background-position: center;
   background-size: cover;
-  transition: opacity 220ms ease;
+  transition: none;
 }
 
 /* ── Status bar ── */
@@ -996,6 +996,44 @@
   opacity: 0 !important;
   transition-duration: 0s !important;
   /* hide instantly so it doesn't bleed through transparent app during fade-in */
+}
+
+/* 改动 ①：桌面图标层、分页圆点、Dock 常驻挂载，App 打开时用 display:none 从布局摘除 */
+.phone-workspace.app-open > .phone-desktop-layer,
+.phone-shell.app-open-shell > .phone-desktop-layer {
+  display: none !important;
+}
+
+/* 改动 ⑤：返回等待遮罩（transition-delay: 220ms 跑在合成器线程，快设备一帧切完不闪） */
+.phone-return-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 950;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 14, 0.28);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease 0ms;
+  will-change: opacity;
+}
+
+.phone-return-mask.is-pending {
+  opacity: 1;
+  transition: opacity 160ms ease 220ms;
+}
+
+.phone-return-pill {
+  padding: 9px 18px;
+  border-radius: 999px;
+  background: rgba(20, 20, 28, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: rgba(248, 248, 252, 0.95);
+  font-size: calc(13px * var(--app-text-scale, 1));
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
 }
 
 
