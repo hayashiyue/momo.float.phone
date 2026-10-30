@@ -6,6 +6,7 @@ import type {
     RegexConfig,
     RegexRule,
     ApiConfig,
+    ApiGroup,
     VoiceApiConfig,
     ImageGenerationSettings,
     OpenAiImagePreset,
@@ -80,6 +81,7 @@ function isUnsupportedWorldBookFormat(obj: Record<string, unknown>): boolean {
 
 // --- Keys ---
 const API_CONFIGS_KEY = "ai_phone_api_configs_v1";
+const API_GROUPS_KEY = "ai_phone_api_groups_v1";
 const VOICE_CONFIGS_KEY = "ai_phone_voice_configs_v1";
 const IMAGE_GENERATION_SETTINGS_KEY = "ai_phone_image_generation_settings_v1";
 const BINDINGS_KEY = "ai_phone_bindings_v1";
@@ -90,6 +92,7 @@ const USER_IDENTITIES_KEY = "ai_phone_user_identities_v1";
 // Legacy key for migration
 const LEGACY_OVERRIDES_KEY = "ai_phone_char_settings_v1";
 registerKvMigration(API_CONFIGS_KEY);
+registerKvMigration(API_GROUPS_KEY);
 registerKvMigration(VOICE_CONFIGS_KEY);
 registerKvMigration(IMAGE_GENERATION_SETTINGS_KEY);
 registerKvMigration(BINDINGS_KEY);
@@ -646,6 +649,34 @@ export function loadApiConfigs(): ApiConfig[] {
 export function saveApiConfigs(configs: ApiConfig[]): void {
     if (typeof window === "undefined") return;
     kvSet(API_CONFIGS_KEY, JSON.stringify(configs.map(normalizeApiConfig)));
+}
+
+// --- API Groups（文件夹） ──────────────────────────────────────
+
+function normalizeApiGroup(group: ApiGroup): ApiGroup {
+    return {
+        id: typeof group?.id === "string" ? group.id : generateId("apigroup"),
+        name: typeof group?.name === "string" && group.name.trim() ? group.name : "新文件夹",
+        collapsed: group?.collapsed === true,
+        createdAt: typeof group?.createdAt === "number" ? group.createdAt : undefined,
+    };
+}
+
+export function loadApiGroups(): ApiGroup[] {
+    if (typeof window === "undefined") return [];
+    try {
+        const raw = kvGet(API_GROUPS_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw) as ApiGroup[];
+        return Array.isArray(parsed) ? parsed.map(normalizeApiGroup) : [];
+    } catch {
+        return [];
+    }
+}
+
+export function saveApiGroups(groups: ApiGroup[]): void {
+    if (typeof window === "undefined") return;
+    kvSet(API_GROUPS_KEY, JSON.stringify(groups.map(normalizeApiGroup)));
 }
 
 // --- Voice Configs ──────────────────────────────────────────

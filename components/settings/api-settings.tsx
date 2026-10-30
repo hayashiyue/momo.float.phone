@@ -1,10 +1,19 @@
 "use client";
 
-import { useState, useEffect, useCallback, useContext } from "react";
-import { Plus, RefreshCw, Rss, AlertCircle, FileEdit, Trash2, X, Check } from "lucide-react";
+import { useState, useEffect, useCallback, useContext, type PointerEvent as ReactPointerEvent } from "react";
+import { Plus, RefreshCw, Rss, AlertCircle, FileEdit, Trash2, X, Check, Folder, FolderPlus, ChevronDown, ChevronRight } from "lucide-react";
 import { SettingsContext } from "../phone-settings-app";
-import type { ApiConfig } from "@/lib/settings-types";
-import { loadApiConfigs, removeApiConfigReferences, saveApiConfigs } from "@/lib/settings-storage";
+import type { ApiConfig, ApiGroup } from "@/lib/settings-types";
+import { loadApiConfigs, loadApiGroups, removeApiConfigReferences, saveApiConfigs } from "@/lib/settings-storage";
+import {
+    addApiGroup,
+    buildApiSections,
+    deleteApiGroup,
+    moveApiConfigToGroup,
+    renameApiGroup,
+    setApiGroupCollapsed,
+} from "@/lib/api-groups";
+import { useApiDrag } from "@/lib/use-api-drag";
 import { generateEmbedding, isEmbeddingModelName } from "@/lib/memory-embedding";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { Toggle, Input } from "@/components/ui/form";
@@ -34,9 +43,13 @@ function getNativeToolProtocolLabel(config: ApiConfig): string {
 export function ApiSettings() {
     const { setSubpageRightAction } = useContext(SettingsContext);
     const [configs, setConfigs] = useState<ApiConfig[]>([]);
+    const [groups, setGroups] = useState<ApiGroup[]>([]);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [isNewConfig, setIsNewConfig] = useState(false);
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+    const [confirmDeleteGroupId, setConfirmDeleteGroupId] = useState<string | null>(null);
+    const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
+    const [renamingGroupName, setRenamingGroupName] = useState("");
     const [isLoaded, setIsLoaded] = useState(false);
 
     // Testing and Fetching states
@@ -54,6 +67,7 @@ export function ApiSettings() {
             setConfigs(DEFAULT_CONFIGS);
             saveApiConfigs(DEFAULT_CONFIGS);
         }
+        setGroups(loadApiGroups());
         setIsLoaded(true);
     }, []);
 
@@ -62,10 +76,11 @@ export function ApiSettings() {
         saveApiConfigs(newConfigs);
     }, []);
 
-    const addConfig = useCallback(() => {
+    const addConfig = useCallback((groupId?: string) => {
         const newConfig: ApiConfig = {
             id: `config-${Date.now()}`,
             name: "新配置",
+            groupId: groupId || "",
             provider: "Custom",
             apiKey: "",
             defaultModel: "",
@@ -79,10 +94,45 @@ export function ApiSettings() {
         setEditingId(newConfig.id);
     }, [configs, persist]);
 
+    // --- 文件夹（API 分组）操作 ---
+    const handleCreateGroup = useCallback(() => {
+        const next = addApiGroup("新文件夹");
+        setGroups(next);
+        const created = next[next.length - 1];
+        if (created) {
+            setRenamingGroupId(created.id);
+            setRenamingGroupName(created.name);
+        }
+    }, []);
+
+    const commitGroupRename = useCallback((groupId: string) => {
+        setGroups(renameApiGroup(groupId, renamingGroupName));
+        setRenamingGroupId(null);
+    }, [renamingGroupName]);
+
+    const handleDeleteGroup = useCallback((groupId: string) => {
+        const { groups: nextGroups, configs: nextConfigs } = deleteApiGroup(groupId);
+        setGroups(nextGroups);
+        setConfigs(nextConfigs);
+        setConfirmDeleteGroupId(null);
+    }, []);
+
+    const toggleGroupCollapsed = useCallback((groupId: string, collapsed: boolean) => {
+        setGroups(setApiGroupCollapsed(groupId, collapsed));
+    }, []);
+
+    const handleMoveConfig = useCallback((configId: string, groupId: string) => {
+        persist(moveApiConfigToGroup(configId, groupId));
+        // 拖进折叠的文件夹后自动展开，让用户看到卡片落位
+        if (groupId) setGroups(setApiGroupCollapsed(groupId, false));
+    }, [persist]);
+
+    const { overlay: dragOverlay, handleDragPointerDown, consumeSuppressedClick } = useApiDrag(handleMoveConfig);
+
     useEffect(() => {
         setSubpageRightAction("api",
             <button
-                onClick={addConfig}
+                onClick={() => addConfig()}
                 className="inline-flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-[20px] bg-black px-4 text-xs font-bold text-white shadow-sm transition-all hover:bg-gray-800 hover:shadow-md active:scale-95 focus:outline-none"
             >
                 <Plus size={15} strokeWidth={1.8} />
@@ -217,6 +267,23 @@ export function ApiSettings() {
                 <h2 className="m-0 mx-2 ts-28 font-bold italic leading-none text-black">API Settings</h2>
             </div>
 
+            <div className="flex items-center gap-2 mx-2 -mt-2">
+                <button
+                    type="button"
+                    onClick={handleCreateGroup}
+                    className="ui-btn ui-btn-outline"
+                >
+                    <FolderPlus size={16} />
+                    新建文件夹
+                </button>
+            </div>
+
+            {groups.length > 0 ? (
+                <p className="menu-desc mx-2" style={{ marginTop: -8 }}>
+                    直接把 API 卡片拖到文件夹那一行即可移入；拖到「未分组」行可移出文件夹。
+                </p>
+            ) : null}
+
             {configs.length === 0 ? (
                 <div className="ui-empty">
                     <div className="ui-icon-circle">
@@ -226,58 +293,130 @@ export function ApiSettings() {
                     <span className="menu-desc max-w-[240px]">
                         配置 API 密钥和模型以连接到 AI 服务。
                     </span>
-                    <button onClick={addConfig} className="ui-btn ui-btn-primary rounded-[20px] mt-2">
+                    <button onClick={() => addConfig()} className="ui-btn ui-btn-primary rounded-[20px] mt-2">
                         <Plus size={16} /> 添加配置
                     </button>
                 </div>
-            ) : (
+            ) : groups.length === 0 ? (
                 <div className="grid grid-cols-2 gap-3">
                     {configs.map(config => (
-                        <div
+                        <ApiConfigCard
                             key={config.id}
-                            className="ui-config-card min-w-0 cursor-pointer"
-                            style={{ aspectRatio: "3 / 2", padding: "12px", justifyContent: "space-between" }}
-                            role="button"
-                            tabIndex={0}
-                            aria-label={`编辑 ${config.name || config.provider}`}
-                            onClick={() => setEditingId(config.id)}
-                            onKeyDown={(event) => {
-                                if (event.target !== event.currentTarget) return;
-                                if (event.key === "Enter" || event.key === " ") {
-                                    event.preventDefault();
-                                    setEditingId(config.id);
-                                }
-                            }}
-                        >
-                            <div className="min-w-0 flex flex-col gap-1">
-                                <span className="truncate text-[calc(14.4px*var(--app-text-scale,1))] font-bold leading-tight text-[var(--c-text-title)]">{config.name || config.provider}</span>
-                                <span className="menu-desc truncate">{config.defaultModel || config.provider || "未设置模型"}</span>
-                            </div>
-                            <div className="flex gap-2 shrink-0 items-center justify-end">
-                                <button
-                                    type="button"
-                                    onClick={(event) => {
-                                        event.stopPropagation();
-                                        setEditingId(config.id);
-                                    }}
-                                    className="ui-link-btn"
-                                >
-                                    <FileEdit size={18} />
-                                </button>
-                                <button
-                                    type="button"
-                                    onClick={(event) => {
-                                        event.stopPropagation();
-                                        setConfirmDeleteId(config.id);
-                                    }}
-                                    className="ui-link-btn"
-                                    data-variant="danger"
-                                >
-                                    <Trash2 size={18} />
-                                </button>
-                            </div>
-                        </div>
+                            config={config}
+                            onEdit={() => setEditingId(config.id)}
+                            onDelete={() => setConfirmDeleteId(config.id)}
+                        />
                     ))}
+                </div>
+            ) : (
+                <div className="flex flex-col gap-4">
+                    {buildApiSections(configs, groups).map(section => {
+                        const isGroup = section.kind === "group";
+                        return (
+                            <section key={section.id || "__ungrouped__"} className="api-group-block">
+                                <div
+                                    className="api-group-head"
+                                    data-api-drop-group={isGroup ? section.id : ""}
+                                >
+                                    {isGroup && renamingGroupId === section.id ? (
+                                        <div className="api-group-toggle">
+                                            <Folder size={16} />
+                                            <input
+                                                className="api-group-rename-input"
+                                                value={renamingGroupName}
+                                                autoFocus
+                                                aria-label="文件夹名称"
+                                                onChange={event => setRenamingGroupName(event.target.value)}
+                                                onBlur={() => commitGroupRename(section.id)}
+                                                onKeyDown={event => {
+                                                    if (event.key === "Enter") {
+                                                        event.preventDefault();
+                                                        commitGroupRename(section.id);
+                                                    } else if (event.key === "Escape") {
+                                                        event.preventDefault();
+                                                        setRenamingGroupId(null);
+                                                    }
+                                                }}
+                                            />
+                                        </div>
+                                    ) : isGroup ? (
+                                        <button
+                                            type="button"
+                                            className="api-group-toggle"
+                                            onClick={() => toggleGroupCollapsed(section.id, !section.collapsed)}
+                                        >
+                                            {section.collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                                            <Folder size={16} />
+                                            <span className="api-group-name">{section.name}</span>
+                                            <span className="api-group-count">{section.items.length}</span>
+                                        </button>
+                                    ) : (
+                                        <div className="api-group-toggle" data-static="true">
+                                            <Folder size={16} />
+                                            <span className="api-group-name">未分组</span>
+                                            <span className="api-group-count">{section.items.length}</span>
+                                        </div>
+                                    )}
+
+                                    <div className="api-group-actions">
+                                        <button
+                                            type="button"
+                                            className="ui-link-btn"
+                                            aria-label={isGroup ? "在该文件夹新增 API" : "新增未分组 API"}
+                                            onClick={() => addConfig(isGroup ? section.id : "")}
+                                        >
+                                            <Plus size={18} />
+                                        </button>
+                                        {isGroup ? (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    className="ui-link-btn"
+                                                    aria-label="重命名文件夹"
+                                                    onClick={() => {
+                                                        setRenamingGroupId(section.id);
+                                                        setRenamingGroupName(section.name);
+                                                    }}
+                                                >
+                                                    <FileEdit size={18} />
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    className="ui-link-btn"
+                                                    data-variant="danger"
+                                                    aria-label="删除文件夹"
+                                                    onClick={() => setConfirmDeleteGroupId(section.id)}
+                                                >
+                                                    <Trash2 size={18} />
+                                                </button>
+                                            </>
+                                        ) : null}
+                                    </div>
+                                </div>
+
+                                {section.collapsed ? null : section.items.length === 0 ? (
+                                    <div className="api-group-empty">
+                                        {isGroup
+                                            ? "文件夹还是空的：点右侧「+」新增，或把下面的 API 卡片拖到这一行"
+                                            : "没有未分组的 API：把卡片拖到这一行可以移出文件夹"}
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-2 gap-3">
+                                        {section.items.map(config => (
+                                            <ApiConfigCard
+                                                key={config.id}
+                                                config={config}
+                                                onEdit={() => setEditingId(config.id)}
+                                                onDelete={() => setConfirmDeleteId(config.id)}
+                                                onDragPointerDown={handleDragPointerDown}
+                                                consumeSuppressedClick={consumeSuppressedClick}
+                                            />
+                                        ))}
+                                    </div>
+                                )}
+                            </section>
+                        );
+                    })}
                 </div>
             )}
 
@@ -304,6 +443,19 @@ export function ApiSettings() {
                                                 onChange={(e) => updateConfig(config.id, { name: e.target.value })}
                                                 placeholder="例如: 我的 OpenAI"
                                             />
+                                        </div>
+                                        <div className="flex flex-col gap-1">
+                                            <label className="menu-desc ml-1">所属文件夹 (Group)</label>
+                                            <select
+                                                value={config.groupId || ""}
+                                                onChange={(e) => handleMoveConfig(config.id, e.target.value)}
+                                                className="ui-select"
+                                            >
+                                                <option value="">未分组</option>
+                                                {groups.map(group => (
+                                                    <option key={group.id} value={group.id}>{group.name}</option>
+                                                ))}
+                                            </select>
                                         </div>
                                         <div className="flex flex-col gap-1">
                                             <label className="menu-desc ml-1">服务商 (Provider)</label>
@@ -468,6 +620,91 @@ export function ApiSettings() {
                     onCancel={() => setConfirmDeleteId(null)}
                 />
             )}
+
+            {confirmDeleteGroupId && (
+                <ConfirmDialog
+                    title="删除文件夹？"
+                    message={`文件夹里的 ${
+                        configs.filter(config => (config.groupId || "") === confirmDeleteGroupId).length
+                    } 个 API 会移到「未分组」，不会被删除。文件夹本身无法恢复。`}
+                    icon={AlertCircle}
+                    variant="danger"
+                    confirmLabel="确认删除"
+                    cancelLabel="取消"
+                    onConfirm={() => handleDeleteGroup(confirmDeleteGroupId)}
+                    onCancel={() => setConfirmDeleteGroupId(null)}
+                />
+            )}
+
+            {dragOverlay ? (
+                <div
+                    className="api-drag-ghost"
+                    data-over-target={dragOverlay.targetGroupId !== null ? "true" : undefined}
+                    style={{ left: dragOverlay.x, top: dragOverlay.y }}
+                >
+                    {dragOverlay.label}
+                </div>
+            ) : null}
+        </div>
+    );
+}
+
+function ApiConfigCard({ config, onEdit, onDelete, onDragPointerDown, consumeSuppressedClick }: {
+    config: ApiConfig;
+    onEdit: () => void;
+    onDelete: () => void;
+    onDragPointerDown?: (event: ReactPointerEvent<HTMLElement>, config: ApiConfig) => void;
+    consumeSuppressedClick?: () => boolean;
+}) {
+    return (
+        <div
+            className="ui-config-card api-drag-source min-w-0 cursor-pointer"
+            style={{ aspectRatio: "3 / 2", padding: "12px", justifyContent: "space-between" }}
+            role="button"
+            tabIndex={0}
+            aria-label={`编辑 ${config.name || config.provider}`}
+            onPointerDown={(event) => onDragPointerDown?.(event, config)}
+            onClick={() => {
+                if (consumeSuppressedClick?.()) return;
+                onEdit();
+            }}
+            onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onEdit();
+                }
+            }}
+        >
+            <div className="min-w-0 flex flex-col gap-1">
+                <span className="truncate text-[calc(14.4px*var(--app-text-scale,1))] font-bold leading-tight text-[var(--c-text-title)]">{config.name || config.provider}</span>
+                <span className="menu-desc truncate">{config.defaultModel || config.provider || "未设置模型"}</span>
+            </div>
+            <div className="flex gap-2 shrink-0 items-center justify-end">
+                <button
+                    type="button"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onEdit();
+                    }}
+                    className="ui-link-btn"
+                >
+                    <FileEdit size={18} />
+                </button>
+                <button
+                    type="button"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onDelete();
+                    }}
+                    className="ui-link-btn"
+                    data-variant="danger"
+                >
+                    <Trash2 size={18} />
+                </button>
+            </div>
         </div>
     );
 }

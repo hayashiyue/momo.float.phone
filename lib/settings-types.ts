@@ -145,6 +145,8 @@ export type RegexConfig = SettingItemMeta & {
 export type ApiConfig = {
     id: string;
     name?: string;
+    /** 所属 API 文件夹 id；为空表示「未分组」 */
+    groupId?: string;
     provider: string;
     apiKey: string;
     baseUrl?: string;
@@ -153,6 +155,15 @@ export type ApiConfig = {
     enableImageRecognition: boolean;
     enableImageGeneration: boolean;
     preventEmptyGenerateRambling?: boolean;
+};
+
+// --- ApiGroup：API 文件夹，用于把同一站点的多个配置收纳在一起 ---
+export type ApiGroup = {
+    id: string;
+    name: string;
+    /** 在列表里是否折叠（快捷菜单与设置页共用同一状态） */
+    collapsed?: boolean;
+    createdAt?: number;
 };
 
 // --- VoiceApiConfig (migrated from voice-settings.tsx) ---

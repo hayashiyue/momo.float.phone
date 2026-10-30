@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type CSSProperties } from "react";
-import { BookOpen, Check, ChevronDown, Code2, FlaskConical, Loader2, RefreshCw, SlidersHorizontal, UserRound, X } from "lucide-react";
+import { BookOpen, Check, ChevronDown, ChevronRight, Code2, FlaskConical, Folder, FolderPlus, Loader2, Pencil, RefreshCw, SlidersHorizontal, UserRound, X } from "lucide-react";
 import { CHAT_APP_SETTINGS_UPDATED_EVENT, loadChatAppSettings } from "@/lib/chat-storage";
 import {
     getFloatingDockState,
@@ -15,13 +15,22 @@ import {
 import {
     getCharacterBinding,
     loadApiConfigs,
+    loadApiGroups,
     loadBindingConfig,
     loadWorldBooks,
     saveBindingConfig,
     saveApiConfigs,
     setCharacterBinding,
 } from "@/lib/settings-storage";
-import type { ApiConfig, BindingConfig, BindingSlot, WorldBookConfig } from "@/lib/settings-types";
+import type { ApiConfig, ApiGroup, BindingConfig, BindingSlot, WorldBookConfig } from "@/lib/settings-types";
+import {
+    addApiGroup,
+    buildApiSections,
+    moveApiConfigToGroup,
+    renameApiGroup,
+    type ApiSection,
+} from "@/lib/api-groups";
+import { useApiDrag } from "@/lib/use-api-drag";
 import { loadCharacters } from "@/lib/character-storage";
 import type { Character } from "@/lib/character-types";
 import { determineBaseUrl, simpleLLMCall } from "@/lib/api-helpers";
@@ -65,6 +74,11 @@ export function QuickActionFloat() {
     const [selectedCharId, setSelectedCharId] = useState("");
     const [config, setConfig] = useState<BindingConfig>(EMPTY_BINDING_CONFIG);
     const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([]);
+    const [apiGroups, setApiGroups] = useState<ApiGroup[]>([]);
+    // 文件夹折叠状态是面板内的临时态：默认折叠，当前选中项所在文件夹自动展开
+    const [groupCollapsedOverride, setGroupCollapsedOverride] = useState<Record<string, boolean>>({});
+    const [renamingGroupId, setRenamingGroupId] = useState("");
+    const [renamingGroupName, setRenamingGroupName] = useState("");
     const [worldBooks, setWorldBooks] = useState<WorldBookConfig[]>([]);
     const [characters, setCharacters] = useState<Character[]>([]);
     const [fetchedModels, setFetchedModels] = useState<Record<string, string[]>>({});
@@ -92,6 +106,7 @@ export function QuickActionFloat() {
         const nextCharacters = loadCharacters();
         setConfig(loadBindingConfig());
         setApiConfigs(loadApiConfigs());
+        setApiGroups(loadApiGroups());
         setWorldBooks(loadWorldBooks());
         setCharacters(nextCharacters);
         setSelectedCharId(prev => {
@@ -129,6 +144,13 @@ export function QuickActionFloat() {
             window.removeEventListener("focus", handleFocus);
         };
     }, [enabled, reloadData]);
+
+    // 每次重新打开面板，文件夹折叠状态回到默认（只展开当前正在用的那个文件夹）
+    useEffect(() => {
+        if (!open) return;
+        setGroupCollapsedOverride({});
+        setRenamingGroupId("");
+    }, [open]);
 
     useEffect(() => {
         if (!open) return;
@@ -214,6 +236,44 @@ export function QuickActionFloat() {
     const selectedWorldBookIds = currentSlot.worldBookIds || [];
     const selectedWorldBookNames = selectedWorldBookIds.map(id => itemName(worldBooks, id)).filter(Boolean);
     const inheritedApiName = scope === "character" ? itemName(apiConfigs, config.globalDefaults.apiConfigId) : "";
+    const apiSections = useMemo(() => buildApiSections(apiConfigs, apiGroups), [apiConfigs, apiGroups]);
+    const hasApiGroups = apiGroups.length > 0;
+
+    // 默认折叠；当前正在用的 API 所在文件夹自动展开，让用户一眼看到选中项
+    const isGroupCollapsed = useCallback((section: ApiSection): boolean => {
+        const override = groupCollapsedOverride[section.id];
+        if (typeof override === "boolean") return override;
+        return !section.items.some(api => api.id === currentSlot.apiConfigId);
+    }, [groupCollapsedOverride, currentSlot.apiConfigId]);
+
+    const toggleGroupCollapsed = useCallback((section: ApiSection) => {
+        setGroupCollapsedOverride(prev => ({ ...prev, [section.id]: !isGroupCollapsed(section) }));
+    }, [isGroupCollapsed]);
+
+    const commitGroupRename = useCallback((groupId: string) => {
+        setApiGroups(renameApiGroup(groupId, renamingGroupName));
+        setRenamingGroupId("");
+    }, [renamingGroupName]);
+
+    // 面板内直接新建文件夹（不必再跑去设置页），建完立刻进入改名状态
+    const createGroupInPanel = useCallback(() => {
+        const next = addApiGroup("新文件夹");
+        setApiGroups(next);
+        const created = next[next.length - 1];
+        if (created) {
+            setRenamingGroupId(created.id);
+            setRenamingGroupName(created.name);
+        }
+    }, []);
+
+    // 拖拽 API 到文件夹行 / 未分组行；落入后自动展开该文件夹，便于确认结果
+    const handleDropApiToGroup = useCallback((configId: string, groupId: string) => {
+        setApiConfigs(moveApiConfigToGroup(configId, groupId));
+        if (groupId) setGroupCollapsedOverride(prev => ({ ...prev, [groupId]: false }));
+    }, []);
+
+    const { overlay: dragOverlay, handleDragPointerDown, consumeSuppressedClick } = useApiDrag(handleDropApiToGroup);
+
     const inheritedWorldBookNames = scope === "character"
         ? (config.globalDefaults.worldBookIds || []).map(id => itemName(worldBooks, id)).filter(Boolean)
         : [];
@@ -481,6 +541,24 @@ export function QuickActionFloat() {
     const isQuickPrimary = !isDual || dockState.primaryTool === "quick-action";
     const isPromptViewerActive = floatingDockEnabled && promptViewerEnabled && dockState.activeTool === "prompt-viewer";
 
+    const renderApiOption = (api: ApiConfig) => (
+        <button
+            type="button"
+            key={api.id}
+            className="quick-action-option api-drag-source"
+            data-selected={currentSlot.apiConfigId === api.id}
+            disabled={characterDisabled}
+            onPointerDown={(event) => handleDragPointerDown(event, api)}
+            onClick={() => {
+                if (consumeSuppressedClick()) return;
+                updateApiConfig(api.id);
+            }}
+        >
+            <span>{api.name || api.defaultModel || api.provider}</span>
+            {currentSlot.apiConfigId === api.id ? <Check size={15} /> : null}
+        </button>
+    );
+
     const isHiddenBehind = isDual && !isQuickPrimary && !open && !dockState.isExpanded;
     const isDocked = floatingDockEnabled && !open && (
         isQuickPrimary ? (dockState.isDocked && !draggingFloatingButton) : false
@@ -598,7 +676,19 @@ export function QuickActionFloat() {
                         <section className="quick-action-section" data-disabled={characterDisabled ? "" : undefined}>
                             <div className="quick-action-section-heading">
                                 <span><Code2 size={16} />API</span>
-                                {currentSlot.apiConfigId ? <small>{itemName(apiConfigs, currentSlot.apiConfigId)}</small> : <small>{scope === "global" ? "未设置" : "继承"}</small>}
+                                <div className="quick-action-heading-right">
+                                    {currentSlot.apiConfigId ? <small>{itemName(apiConfigs, currentSlot.apiConfigId)}</small> : <small>{scope === "global" ? "未设置" : "继承"}</small>}
+                                    <button
+                                        type="button"
+                                        className="quick-action-heading-btn"
+                                        disabled={characterDisabled}
+                                        onClick={createGroupInPanel}
+                                        title="新建 API 文件夹"
+                                        aria-label="新建 API 文件夹"
+                                    >
+                                        <FolderPlus size={14} />
+                                    </button>
+                                </div>
                             </div>
                             <div className="quick-action-option-list">
                                 <button
@@ -613,19 +703,87 @@ export function QuickActionFloat() {
                                 </button>
                                 {apiConfigs.length === 0 ? (
                                     <div className="quick-action-empty">暂无 API 配置</div>
-                                ) : apiConfigs.map(api => (
-                                    <button
-                                        type="button"
-                                        key={api.id}
-                                        className="quick-action-option"
-                                        data-selected={currentSlot.apiConfigId === api.id}
-                                        disabled={characterDisabled}
-                                        onClick={() => updateApiConfig(api.id)}
-                                    >
-                                        <span>{api.name || api.defaultModel || api.provider}</span>
-                                        {currentSlot.apiConfigId === api.id ? <Check size={15} /> : null}
-                                    </button>
-                                ))}
+                                ) : !hasApiGroups ? (
+                                    apiConfigs.map(api => renderApiOption(api))
+                                ) : (
+                                    apiSections.map(section => {
+                                        if (section.kind === "ungrouped") {
+                                            return (
+                                                <div className="quick-action-group" key="__ungrouped__">
+                                                    <div className="quick-action-ungrouped" data-api-drop-group="">
+                                                        未分组
+                                                    </div>
+                                                    {section.items.map(api => renderApiOption(api))}
+                                                </div>
+                                            );
+                                        }
+                                        const collapsed = isGroupCollapsed(section);
+                                        const selectedInside = section.items.some(api => api.id === currentSlot.apiConfigId);
+                                        return (
+                                            <div className="quick-action-group" key={section.id}>
+                                                <div className="quick-action-folder-row" data-api-drop-group={section.id}>
+                                                    {renamingGroupId === section.id ? (
+                                                        <div className="quick-action-folder" data-renaming="true">
+                                                            <Folder size={15} />
+                                                            <input
+                                                                className="quick-action-folder-rename"
+                                                                value={renamingGroupName}
+                                                                autoFocus
+                                                                aria-label="文件夹名称"
+                                                                onChange={event => setRenamingGroupName(event.target.value)}
+                                                                onBlur={() => commitGroupRename(section.id)}
+                                                                onKeyDown={event => {
+                                                                    if (event.key === "Enter") {
+                                                                        event.preventDefault();
+                                                                        commitGroupRename(section.id);
+                                                                    } else if (event.key === "Escape") {
+                                                                        event.preventDefault();
+                                                                        setRenamingGroupId("");
+                                                                    }
+                                                                }}
+                                                            />
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            <button
+                                                                type="button"
+                                                                className="quick-action-folder"
+                                                                data-selected={selectedInside}
+                                                                disabled={characterDisabled}
+                                                                onClick={() => toggleGroupCollapsed(section)}
+                                                            >
+                                                                {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                                                                <Folder size={15} />
+                                                                <span>{section.name}</span>
+                                                                <span className="quick-action-folder-count">{section.items.length}</span>
+                                                                {selectedInside ? <Check size={14} /> : null}
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                className="quick-action-folder-btn"
+                                                                aria-label="重命名文件夹"
+                                                                disabled={characterDisabled}
+                                                                onClick={() => {
+                                                                    setRenamingGroupId(section.id);
+                                                                    setRenamingGroupName(section.name);
+                                                                }}
+                                                            >
+                                                                <Pencil size={13} />
+                                                            </button>
+                                                        </>
+                                                    )}
+                                                </div>
+                                                {collapsed ? null : section.items.length === 0 ? (
+                                                    <div className="quick-action-empty">文件夹还是空的</div>
+                                                ) : (
+                                                    <div className="quick-action-sublist">
+                                                        {section.items.map(api => renderApiOption(api))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })
+                                )}
                             </div>
                             <div className="quick-action-model-tools" data-disabled={!activeApiConfig ? "" : undefined}>
                                 <label className="quick-action-model-select">
@@ -713,6 +871,16 @@ export function QuickActionFloat() {
                             )}
                         </section>
                     </div>
+                </div>
+            ) : null}
+
+            {dragOverlay ? (
+                <div
+                    className="api-drag-ghost"
+                    data-over-target={dragOverlay.targetGroupId !== null ? "true" : undefined}
+                    style={{ left: dragOverlay.x, top: dragOverlay.y }}
+                >
+                    {dragOverlay.label}
                 </div>
             ) : null}
         </div>
