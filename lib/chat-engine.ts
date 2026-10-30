@@ -971,12 +971,11 @@ export async function sendLLMRequest(
     const requestMessages = toLlmRequestMessages(afterPlugins.messages);
     const request = buildProviderRequest(config, effectivePreset, requestMessages);
     publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "completion" });
-    const requestBodyJson = JSON.stringify(request.body);
-    const requestBodySize = requestBodyJson.length;
-    const requestTokenEstimate = Math.ceil(requestBodySize / 3);
     const messageSizes = request.messagesForLog.map((message) => (
-        typeof message.content === "string" ? message.content.length : JSON.stringify(message.content).length
+        typeof message.content === "string" ? message.content.length : 1024
     ));
+    const requestBodySize = messageSizes.reduce((sum, s) => sum + s, 0);
+    const requestTokenEstimate = Math.ceil(requestBodySize / 3);
     const largestMessage = messageSizes.reduce(
         (largest, size, index) => (size > largest.size ? { index, size, role: request.messagesForLog[index]?.role ?? "" } : largest),
         { index: -1, size: 0, role: "" },
@@ -2658,9 +2657,10 @@ async function generateChatCompletionCore(
         // 静默丢掉离线回复——为了第二轮续跑赔掉第一轮，不划算。冷场重连与定时
         // 唤醒是低频任务，那两条照常挂续跑。
         const bailoutMessages = [...llmMessages];
-        // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
-        maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
         void import("./push-bailout-client").then(async mod => {
+            if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
+            // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
+            maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
             const handle = await mod.armReplyBailout({
                 sessionId: session.id,
                 characterName: character.name,

@@ -1408,7 +1408,13 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     const visibleMessagesRef = useRef<ChatMessage[]>([]);
     const hasMoreRef = useRef(false);
     const offlineGenerationInputRef = useRef("");
-    useEffect(() => () => { mountedRef.current = false; }, []);
+    useEffect(() => () => {
+        mountedRef.current = false;
+        if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+        }
+    }, []);
     useEffect(() => { visibleMessagesRef.current = messages; }, [messages]);
     useEffect(() => { hasMoreRef.current = hasMore; }, [hasMore]);
     useChatBottomReserve(
@@ -1456,12 +1462,19 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     }, [applyStoredMessageWindow, session.id]);
 
     const closeContextMenu = () => {
+        if (longPressTimerRef.current) {
+            clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+        }
+        startPosRef.current = null;
+        longPressTriggeredRef.current = false;
         setActiveMessageId(null);
         setActiveOfflineTarget(null);
         setContextMenuAnchor(null);
     };
 
     const openMessageContextMenu = (msgId: string, anchor: ContextMenuAnchor) => {
+        if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) return;
         contextMenuOpenedAtRef.current = Date.now();
         setActiveOfflineTarget(null);
         setContextMenuAnchor(anchor);
@@ -1469,6 +1482,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     };
 
     const openOfflineContextMenu = (target: OfflineActionTarget, anchor: ContextMenuAnchor) => {
+        if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) return;
         contextMenuOpenedAtRef.current = Date.now();
         setActiveMessageId(null);
         setContextMenuAnchor(anchor);
@@ -4362,16 +4376,17 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
 
     const handleOfflinePointerDown = (e: React.PointerEvent, target: OfflineActionTarget) => {
         if (e.pointerType === "mouse" && e.button !== 0) return;
-        e.preventDefault();
+        if (e.pointerType === "mouse") e.preventDefault();
         const anchor = { x: e.clientX, y: e.clientY };
         startPosRef.current = anchor;
         longPressTriggeredRef.current = false;
         if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = setTimeout(() => {
+            longPressTimerRef.current = null;
+            if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) return;
             longPressTriggeredRef.current = true;
             openOfflineContextMenu(target, anchor);
-            longPressTimerRef.current = null;
-        }, 500);
+        }, 450);
     };
 
     const handleOfflineEditStart = (turn: ChatOfflineTurn, role: OfflineActionTarget["role"]) => {
@@ -5099,8 +5114,10 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         // Prevent right click from triggering the timer, as it has its own context menu handler
         if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-        // Prevent text selection on long press
-        e.preventDefault();
+        // 仅鼠标阻止默认选区；触摸设备在 pointerdown 上调用 preventDefault 会导致部分移动端手势异常
+        if (e.pointerType === 'mouse') {
+            e.preventDefault();
+        }
 
         const anchor = { x: e.clientX, y: e.clientY };
         startPosRef.current = anchor;
@@ -5108,10 +5125,11 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
 
         if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
         longPressTimerRef.current = setTimeout(() => {
+            longPressTimerRef.current = null;
+            if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) return;
             longPressTriggeredRef.current = true;
             openMessageContextMenu(msgId, anchor);
-            longPressTimerRef.current = null;
-        }, 500); // 500ms long press
+        }, 450); // 450ms long press
     };
 
     const handleMessagePointerUp = (e: React.PointerEvent) => {
@@ -5813,7 +5831,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
             <header className="page-header chat-room-main-pane" data-ui="header">
                 <div className="page-header-safe-area" />
                 <div className="page-header-content">
-                    <button className="page-back-btn" type="button" onClick={onBack} aria-label="返回">
+                    <button className="page-back-btn" type="button" onClick={() => { closeContextMenu(); onBack(); }} aria-label="返回">
                         <ChevronLeft size={24} strokeWidth={1.5} />
                     </button>
                     <span className="page-title" style={{ position: 'relative' }}>
@@ -5895,12 +5913,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                         onPointerDown={(e) => { e.stopPropagation(); handleOfflinePointerDown(e, { turnId: turn.id, role: "user" }); }}
                                         onPointerUp={(e) => handleMessagePointerUp(e)}
                                         onPointerCancel={handleMessagePointerCancel}
-                                        onPointerLeave={handleMessagePointerCancel}
+                                        onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                         onPointerMove={(e) => {
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openOfflineContextMenu({ turnId: turn.id, role: "user" }, { x: e.clientX, y: e.clientY }); }}
@@ -5963,12 +5981,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                         onPointerDown={(e) => { e.stopPropagation(); handleOfflinePointerDown(e, { turnId: turn.id, role: "assistant" }); }}
                                         onPointerUp={(e) => handleMessagePointerUp(e)}
                                         onPointerCancel={handleMessagePointerCancel}
-                                        onPointerLeave={handleMessagePointerCancel}
+                                        onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                         onPointerMove={(e) => {
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openOfflineContextMenu({ turnId: turn.id, role: "assistant" }, { x: e.clientX, y: e.clientY }); }}
@@ -6062,12 +6080,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                     onPointerDown={(e) => { e.stopPropagation(); handleMessagePointerDown(e, `vc-${vcGroup.startId}`); }}
                                     onPointerUp={(e) => handleMessagePointerUp(e)}
                                     onPointerCancel={handleMessagePointerCancel}
-                                    onPointerLeave={handleMessagePointerCancel}
+                                    onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                     onPointerMove={(e) => {
                                         if (startPosRef.current) {
                                             const dx = Math.abs(e.clientX - startPosRef.current.x);
                                             const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                            if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                            if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                         }
                                     }}
                                     onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(`vc-${vcGroup.startId}`, { x: e.clientX, y: e.clientY }); }}
@@ -6114,12 +6132,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                         onPointerDown={(e) => { e.stopPropagation(); handleMessagePointerDown(e, gMsg.id); }}
                                                         onPointerUp={(e) => handleMessagePointerUp(e)}
                                                         onPointerCancel={handleMessagePointerCancel}
-                                                        onPointerLeave={handleMessagePointerCancel}
+                                                        onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                                         onPointerMove={(e) => {
                                                             if (startPosRef.current) {
                                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                                if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                                             }
                                                         }}
                                                         onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(gMsg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6140,12 +6158,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                             onPointerDown={(e) => { e.stopPropagation(); handleMessagePointerDown(e, gMsg.id); }}
                                                             onPointerUp={(e) => handleMessagePointerUp(e)}
                                                             onPointerCancel={handleMessagePointerCancel}
-                                                            onPointerLeave={handleMessagePointerCancel}
+                                                            onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                                             onPointerMove={(e) => {
                                                                 if (startPosRef.current) {
                                                                     const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                                     const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                                    if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                                    if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                                                 }
                                                             }}
                                                             onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(gMsg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6271,12 +6289,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                             }
                                         }}
                                         onPointerCancel={handleMessagePointerCancel}
-                                        onPointerLeave={handleMessagePointerCancel}
+                                        onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                         onPointerMove={(e) => {
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6338,12 +6356,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                         onPointerDown={(e) => { e.stopPropagation(); handleMessagePointerDown(e, msg.id); }}
                                         onPointerUp={(e) => handleMessagePointerUp(e)}
                                         onPointerCancel={handleMessagePointerCancel}
-                                        onPointerLeave={handleMessagePointerCancel}
+                                        onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                         onPointerMove={(e) => {
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6362,12 +6380,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                     onPointerDown={(e) => { e.stopPropagation(); handleMessagePointerDown(e, msg.id); }}
                                                     onPointerUp={(e) => handleMessagePointerUp(e)}
                                                     onPointerCancel={handleMessagePointerCancel}
-                                                    onPointerLeave={handleMessagePointerCancel}
+                                                    onPointerLeave={(e) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); }}
                                                     onPointerMove={(e) => {
                                                         if (startPosRef.current) {
                                                             const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                             const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                            if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                            if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                                         }
                                                     }}
                                                     onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6423,18 +6441,18 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                 onPointerDown: (e: React.PointerEvent) => { e.stopPropagation(); handleMessagePointerDown(e, msg.id); },
                                                 onPointerUp: (e: React.PointerEvent) => handleMessagePointerUp(e),
                                                 onPointerCancel: handleMessagePointerCancel,
-                                                onPointerLeave: handleMessagePointerCancel,
+                                                onPointerLeave: (e: React.PointerEvent) => { if (e.pointerType === "mouse") handleMessagePointerCancel(); },
                                                 onPointerMove: (e: React.PointerEvent) => {
                                                     if (startPosRef.current) {
                                                         const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                         const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                        if (dx > 18 || dy > 18) handleMessagePointerCancel();
+                                                        if (dx > 24 || dy > 24) handleMessagePointerCancel();
                                                     }
                                                 },
                                                 onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); },
                                             } : {})}
                                             className={`chat-bubble-role-${msg.role} ${isMediaBubble ? "chat-bubble-media" : ""} ${isStandaloneHtmlPreview ? "chat-bubble-html-preview" : ""} ${renderMsg.mediaType === "music_share" ? "chat-bubble-music-share" : ""} ${renderMsg.mediaType === "gift" || renderMsg.mediaType === "image" || isStandaloneHtmlPreview ? "rounded-none" : "rounded-md"} break-words relative cursor-pointer select-none`}
-                                            style={isStandaloneHtmlPreview ? STANDALONE_CARD_BUBBLE_STYLE : undefined}
+                                            style={isStandaloneHtmlPreview ? { ...STANDALONE_CARD_BUBBLE_STYLE, WebkitTouchCallout: "none" } : { WebkitTouchCallout: "none" }}
                                             data-ui={msg.role === "user" ? "bubble-user" : "bubble-bot"}
                                             data-msg-id={msg.id}
                                             {...(activeMessageId === msg.id ? { "data-active": "" } : {})}

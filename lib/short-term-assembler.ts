@@ -213,6 +213,10 @@ export function loadNativeTimeline(
         chatAccountId?: string | null;
         timeAware?: boolean;
         promptTimestampOptions?: PromptTimestampOptions;
+        /** 提示词组装已在外部携带完整私聊 history 时跳过重复全量扫描私聊记录 */
+        skipDirectChat?: boolean;
+        /** 限制每个会话最多扫描末尾多少条消息，避免超大历史在点击生成瞬间阻塞与暴涨内存 */
+        maxMessagesPerSession?: number;
     }
 ): NativeTimelineEntry[] {
     const entries: NativeTimelineEntry[] = [];
@@ -232,9 +236,16 @@ export function loadNativeTimeline(
     const session = sessions.find(s => !s.isGroup && s.contactId === characterId && matchesChatAccount(s));
     const groupSessions = sessions.filter(s => s.isGroup && s.participantIds?.includes(characterId) && matchesChatAccount(s));
 
+    const maxMsgs = options?.maxMessagesPerSession && options.maxMessagesPerSession > 0
+        ? options.maxMessagesPerSession
+        : 0;
+
     // Process group sessions
     for (const gs of groupSessions) {
-        const messages = loadChatMessages(gs.id);
+        const allGroupMessages = loadChatMessages(gs.id);
+        const messages = maxMsgs > 0 && allGroupMessages.length > maxMsgs
+            ? allGroupMessages.slice(-maxMsgs)
+            : allGroupMessages;
         for (const msg of messages) {
             if (msg.isRetracted) continue;
             if (isPromptHiddenChatMessage(msg)) continue;
@@ -323,8 +334,11 @@ export function loadNativeTimeline(
         }
     }
 
-    if (session) {
-        const messages = loadChatMessages(session.id);
+    if (session && !options?.skipDirectChat) {
+        const allDirectMessages = loadChatMessages(session.id);
+        const messages = maxMsgs > 0 && allDirectMessages.length > maxMsgs
+            ? allDirectMessages.slice(-maxMsgs)
+            : allDirectMessages;
         for (const msg of messages) {
             if (msg.isRetracted) continue;
             if (isPromptHiddenChatMessage(msg)) continue;
@@ -1017,6 +1031,16 @@ export function prepareShortTermContext(
     unifiedRecentItems: UnifiedRecentItem[];
 } {
     const timeAware = resolvePromptTimeAware(options?.timeAware);
+    const memConfig = loadMemoryConfig();
+    const budget = memConfig.shortTermTokenBudget;
+    const currentTag = getFeatureTag(appId);
+    const history = options?.history ?? [];
+    const characterName = loadCharacters().find(c => c.id === characterId)?.name ?? "角色";
+    const wrapsCurrentHistory = appId === "chat" || appId === "group_chat" || appId === "story" || appId === "vn" || appId === "adventure";
+    const skipDirectChatEntries = appId === "chat" && !options?.includeDirectChatEntries;
+    // 按短期记忆 token 预算限制单会话扫描上限（至少保留最近 400 条），避免数千条历史在点击生成时瞬间打爆内存
+    const maxMessagesPerSession = budget > 0 ? Math.max(400, Math.min(1500, Math.ceil(budget / 4))) : 800;
+
     let timeline = loadNativeTimeline(characterId, {
         userName: options?.userName,
         appId: appId as import("./settings-types").ContentAppId,
@@ -1025,19 +1049,17 @@ export function prepareShortTermContext(
         afterTimestamp: options?.afterTimestamp,
         timeAware,
         promptTimestampOptions: options?.promptTimestampOptions,
+        skipDirectChat: skipDirectChatEntries,
+        maxMessagesPerSession,
     });
 
-    const memConfig = loadMemoryConfig();
     timeline = filterTimelineByAllowedSources(timeline, memConfig.shortTermAllowedSources);
 
-    // Activation context: full timeline for keyword matching (not truncated)
-    const wbActivationContext = timeline.slice(-10).map(e => e.content).join("\n");
-    const budget = memConfig.shortTermTokenBudget;
-    const currentTag = getFeatureTag(appId);
-    const history = options?.history ?? [];
-    const characterName = loadCharacters().find(c => c.id === characterId)?.name ?? "角色";
-    const wrapsCurrentHistory = appId === "chat" || appId === "group_chat" || appId === "story" || appId === "vn" || appId === "adventure";
-    const skipDirectChatEntries = appId === "chat" && !options?.includeDirectChatEntries;
+    // Activation context: combine recent timeline + recent history for keyword matching
+    const wbActivationContext = [
+        ...timeline.slice(-10).map(e => e.content),
+        ...(skipDirectChatEntries ? history.slice(-10).map(m => m.content) : []),
+    ].slice(-10).join("\n");
 
     // ── Collect non-history entries per block ──
     const raw: { tag: string; order: number; entries: NativeTimelineEntry[] }[] = [];
@@ -1177,9 +1199,18 @@ export function prepareShortTermContext(
             pool.push({ kind: "entry", timestamp: e.timestamp, tokens: estimateTokens(e.content) + 4, entryId: e.id, sourceTag: r.tag });
         }
     }
-    for (let i = 0; i < history.length; i++) {
+    // 从最新消息向旧消息扫描，达到短期记忆 token 预算上限后停止继续扫描更早的远古消息
+    const historyPoolItems: PoolItem[] = [];
+    let historyAccumTokens = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
         if (isPromptHiddenChatMessage(history[i], { includeNativeToolHistory: options?.includeNativeToolHistory })) continue;
-        pool.push({ kind: "history", timestamp: history[i].createdAt, tokens: estimateTokens(history[i].content) + 4, msgIdx: i });
+        const tokens = estimateTokens(history[i].content) + 4;
+        historyPoolItems.push({ kind: "history", timestamp: history[i].createdAt, tokens, msgIdx: i });
+        historyAccumTokens += tokens;
+        if (budget > 0 && historyAccumTokens > budget && historyPoolItems.length >= 20) break;
+    }
+    for (let i = historyPoolItems.length - 1; i >= 0; i--) {
+        pool.push(historyPoolItems[i]);
     }
 
     pool.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -1281,6 +1312,10 @@ export function prepareGroupShortTermContext(
     const memConfig = loadMemoryConfig();
     const allowed = memConfig.shortTermAllowedSources ?? {};
 
+    const groupMaxMessages = memConfig.shortTermTokenBudget > 0
+        ? Math.max(400, Math.min(1200, Math.ceil(memConfig.shortTermTokenBudget / 4)))
+        : 600;
+
     for (const characterId of uniqueCharacterIds) {
         let timeline = loadNativeTimeline(characterId, {
             userName: options?.userName,
@@ -1289,6 +1324,7 @@ export function prepareGroupShortTermContext(
             chatAccountId: options?.chatAccountId,
             timeAware,
             promptTimestampOptions: options?.promptTimestampOptions,
+            maxMessagesPerSession: groupMaxMessages,
         });
         timeline = filterTimelineByAllowedSources(timeline, allowed);
         for (const entry of timeline) {
@@ -1417,14 +1453,22 @@ export function prepareGroupShortTermContext(
             });
         }
     }
-    for (let i = 0; i < history.length; i++) {
+    const groupHistoryItems: PoolItem[] = [];
+    let groupHistoryAccumTokens = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
         if (isPromptHiddenChatMessage(history[i], { includeNativeToolHistory: options?.includeNativeToolHistory })) continue;
-        pool.push({
+        const tokens = estimateTokens(history[i].content) + 4;
+        groupHistoryItems.push({
             kind: "history",
             timestamp: history[i].createdAt,
-            tokens: estimateTokens(history[i].content) + 4,
+            tokens,
             msgIdx: i,
         });
+        groupHistoryAccumTokens += tokens;
+        if (budget > 0 && groupHistoryAccumTokens > budget && groupHistoryItems.length >= 20) break;
+    }
+    for (let i = groupHistoryItems.length - 1; i >= 0; i--) {
+        pool.push(groupHistoryItems[i]);
     }
 
     pool.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
