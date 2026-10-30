@@ -1035,7 +1035,7 @@
   right: auto !important;
   bottom: auto !important;
   transform: none !important;
-  z-index: 80;
+  z-index: 9999;
 }
 .chat-floating-ctx-menu[data-role="user"],
 .chat-floating-ctx-menu[data-role="assistant"] {

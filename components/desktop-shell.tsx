@@ -1157,6 +1157,8 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
 
     const isBackButton = (target: EventTarget | null): boolean => {
       if (!(target instanceof Element)) return false;
+      // 聊天室内部（或设置子面板）点返回只是切回会话列表，不退出 App，不挂全屏等待遮罩
+      if (target.closest(".chat-room-layer, .chat-settings-layer")) return false;
       const btn = target.closest("button, [role='button']");
       if (!btn) return false;
       const label = (btn.getAttribute("aria-label") || btn.getAttribute("title") || "").trim();

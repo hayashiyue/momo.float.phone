@@ -1400,6 +1400,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
     const startPosRef = useRef<{ x: number, y: number } | null>(null);
     const longPressTriggeredRef = useRef(false);
+    const contextMenuOpenedAtRef = useRef(0);
 
     const scrollRef = useRef<HTMLDivElement>(null);
     const mountedRef = useRef(true);
@@ -1461,12 +1462,14 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     };
 
     const openMessageContextMenu = (msgId: string, anchor: ContextMenuAnchor) => {
+        contextMenuOpenedAtRef.current = Date.now();
         setActiveOfflineTarget(null);
         setContextMenuAnchor(anchor);
         setActiveMessageId(msgId);
     };
 
     const openOfflineContextMenu = (target: OfflineActionTarget, anchor: ContextMenuAnchor) => {
+        contextMenuOpenedAtRef.current = Date.now();
         setActiveMessageId(null);
         setContextMenuAnchor(anchor);
         setActiveOfflineTarget(target);
@@ -3425,11 +3428,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         onStreamDelta: (delta) => {
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
+                            if (!isChatRoomElementVisible(wrapperRef.current)) return;
                             // 群聊全文解析较重：合并到 rAF 下一帧执行，避免一帧多段增量重复解析
                             if (streamParseFrameRef.current) return;
                             streamParseFrameRef.current = window.requestAnimationFrame(() => {
                                 streamParseFrameRef.current = 0;
-                                if (!isCurrentGeneration()) return;
+                                if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                                 const nameToId = new Map(groupCharacters.map(item => [item.name, item.id]));
                                 const rawParts = parseGroupChatResponse(streamAccumRef.current, nameToId);
                                 const parts = rawParts
@@ -3472,11 +3476,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         onStreamDelta: (delta) => {
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
+                            if (!isChatRoomElementVisible(wrapperRef.current)) return;
                             // 预览更新合并到 rAF 下一帧：每帧最多一次全文净化+setState，避免高频增量卡顿
                             if (streamParseFrameRef.current) return;
                             streamParseFrameRef.current = window.requestAnimationFrame(() => {
                                 streamParseFrameRef.current = 0;
-                                if (!isCurrentGeneration()) return;
+                                if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                                 setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                             });
                         },
@@ -3510,7 +3515,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 isGeneratingRef.current = false;
                 setIsGenerating(false);
                 clearGenerationLock(session.id);
-                if (!mountedRef.current) {
+                if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) {
                     window.dispatchEvent(new CustomEvent(CHAT_BG_COMPLETE, { detail: { sessionId: session.id } }));
                 }
             } else if (!activeGenerationRuns.has(session.id)) {
@@ -3784,11 +3789,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     onStreamDelta: (delta) => {
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
+                        if (!isChatRoomElementVisible(wrapperRef.current)) return;
                         // 群聊全文解析较重：合并到 rAF 下一帧执行，避免一帧多段增量重复解析
                         if (streamParseFrameRef.current) return;
                         streamParseFrameRef.current = window.requestAnimationFrame(() => {
                             streamParseFrameRef.current = 0;
-                            if (!isCurrentGeneration()) return;
+                            if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                             const nameToId = new Map(groupCharacters.map(item => [item.name, item.id]));
                             const rawParts = parseGroupChatResponse(streamAccumRef.current, nameToId);
                             const parts = rawParts
@@ -3960,11 +3966,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     onStreamDelta: (delta) => {
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
+                        if (!isChatRoomElementVisible(wrapperRef.current)) return;
                         // 预览更新合并到 rAF 下一帧：每帧最多一次全文净化+setState，避免高频增量卡顿
                         if (streamParseFrameRef.current) return;
                         streamParseFrameRef.current = window.requestAnimationFrame(() => {
                             streamParseFrameRef.current = 0;
-                            if (!isCurrentGeneration()) return;
+                            if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                             setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                         });
                     },
@@ -4066,7 +4073,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 isGeneratingRef.current = false;
                 setIsGenerating(false);
                 clearGenerationLock(session.id);
-                if (!mountedRef.current) {
+                if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) {
                     window.dispatchEvent(new CustomEvent(CHAT_BG_COMPLETE, { detail: { sessionId: session.id } }));
                 }
                 // 生成期间被丢弃的回复请求（拉黑/解除拉黑等系统事件）优先补跑一轮，
@@ -5231,7 +5238,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 <div data-menu-triangle className="ctx-menu-triangle absolute -top-[6px] w-0 h-0" />
             </div>
         );
-        return wrapperRef.current ? createPortal(menu, wrapperRef.current) : menu;
+        return typeof document !== "undefined" ? createPortal(menu, document.body) : menu;
     };
 
     const getStoredActionMessageId = (msg: ChatMessage | RenderChatMessage): string => {
@@ -5330,7 +5337,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 <div data-menu-triangle className="ctx-menu-triangle absolute -top-[6px] w-0 h-0" />
             </div>
         );
-        return wrapperRef.current ? createPortal(menu, wrapperRef.current) : menu;
+        return typeof document !== "undefined" ? createPortal(menu, document.body) : menu;
     };
 
     const renderDeleteOnlyContextMenu = (onDelete: () => void, onMultiSelect?: () => void) => {
@@ -5361,7 +5368,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 <div data-menu-triangle className="ctx-menu-triangle absolute -top-[6px] w-0 h-0" />
             </div>
         );
-        return wrapperRef.current ? createPortal(menu, wrapperRef.current) : menu;
+        return typeof document !== "undefined" ? createPortal(menu, document.body) : menu;
     };
 
     const renderSystemContextMenu = (msg: ChatMessage) => {
@@ -5397,7 +5404,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     <div data-menu-triangle className="ctx-menu-triangle absolute -top-[6px] w-0 h-0" />
                 </div>
             );
-            return wrapperRef.current ? createPortal(instructionMenu, wrapperRef.current) : instructionMenu;
+            return typeof document !== "undefined" ? createPortal(instructionMenu, document.body) : instructionMenu;
         }
 
         const menu = (
@@ -5441,7 +5448,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 <div data-menu-triangle className="ctx-menu-triangle absolute -top-[6px] w-0 h-0" />
             </div>
         );
-        return wrapperRef.current ? createPortal(menu, wrapperRef.current) : menu;
+        return typeof document !== "undefined" ? createPortal(menu, document.body) : menu;
     };
 
     // ── Voice call message grouping ──────────────────
@@ -5838,6 +5845,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 ref={scrollRef}
                 className="page-body chat-room-main-pane flex flex-col gap-4 chat-scroll-anchored"
                 onScroll={(e) => {
+                    if (Date.now() - contextMenuOpenedAtRef.current < 300) return;
                     if (activeMessageId || activeOfflineTarget) closeContextMenu();
                 }}
                 onPointerDown={(e) => {
@@ -5892,7 +5900,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openOfflineContextMenu({ turnId: turn.id, role: "user" }, { x: e.clientX, y: e.clientY }); }}
@@ -5960,7 +5968,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openOfflineContextMenu({ turnId: turn.id, role: "assistant" }, { x: e.clientX, y: e.clientY }); }}
@@ -6059,7 +6067,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                         if (startPosRef.current) {
                                             const dx = Math.abs(e.clientX - startPosRef.current.x);
                                             const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                            if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                            if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                         }
                                     }}
                                     onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(`vc-${vcGroup.startId}`, { x: e.clientX, y: e.clientY }); }}
@@ -6111,7 +6119,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                             if (startPosRef.current) {
                                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                                if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                                             }
                                                         }}
                                                         onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(gMsg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6137,7 +6145,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                                 if (startPosRef.current) {
                                                                     const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                                     const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                                    if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                                    if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                                                 }
                                                             }}
                                                             onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(gMsg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6268,7 +6276,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6335,7 +6343,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                             if (startPosRef.current) {
                                                 const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                 const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                             }
                                         }}
                                         onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6359,7 +6367,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                         if (startPosRef.current) {
                                                             const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                             const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                            if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                            if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                                         }
                                                     }}
                                                     onContextMenu={(e) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); }}
@@ -6420,7 +6428,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                     if (startPosRef.current) {
                                                         const dx = Math.abs(e.clientX - startPosRef.current.x);
                                                         const dy = Math.abs(e.clientY - startPosRef.current.y);
-                                                        if (dx > 10 || dy > 10) handleMessagePointerCancel();
+                                                        if (dx > 18 || dy > 18) handleMessagePointerCancel();
                                                     }
                                                 },
                                                 onContextMenu: (e: React.MouseEvent) => { e.preventDefault(); openMessageContextMenu(msg.id, { x: e.clientX, y: e.clientY }); },
