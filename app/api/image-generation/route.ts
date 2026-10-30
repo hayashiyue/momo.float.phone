@@ -208,13 +208,19 @@ async function runNovelAiGeneration(input: ImageGenerationRequest): Promise<{ st
 
     const { width, height } = getNovelAiResolution(input.size);
 
-    const url = "https://image.novelai.net/ai/generate-image";
+    const customUrl = input.baseUrl?.trim();
+    if (customUrl && !/^https?:\/\//i.test(customUrl)) {
+      return { status: 400, body: { error: "NovelAI 自定义 URL 必须以 http:// 或 https:// 开头" } };
+    }
+    const url = customUrl || "https://image.novelai.net/ai/generate-image";
     const headers: Record<string, string> = {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      Origin: "https://novelai.net",
-      Referer: "https://novelai.net/",
     };
+    if (!customUrl) {
+      headers.Origin = "https://novelai.net";
+      headers.Referer = "https://novelai.net/";
+    }
 
     const parameters: Record<string, unknown> = {
       width,

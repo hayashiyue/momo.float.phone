@@ -47,6 +47,7 @@ interface MessageBubbleProps {
     onMeetingInviteAction?: (msg: ChatMessage, action: "accept" | "decline") => void;
     displayContent?: string;
     defaultTranslationExpanded?: boolean;
+    onFavoriteMedia?: (msg: ChatMessage) => void | Promise<void>;
 }
 
 /** 聊天插件自定义消息气泡：把裸 DOM 容器交给注册了该 kind 的插件渲染 */
@@ -90,7 +91,7 @@ function PluginKindBubble({ msg, kind }: { msg: ChatMessage; kind: string }) {
  * Renders a message bubble based on its mediaType.
  * Falls back to ReactMarkdown for plain text messages.
  */
-export const MessageBubble = memo(function MessageBubble({ msg, onUpdate, charName, userName, onSystemMessage, groupSize, onShowDetail, characterId, onMusicPlay, onActionSelect, onMeetingInviteAction, displayContent, defaultTranslationExpanded = false }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ msg, onUpdate, charName, userName, onSystemMessage, groupSize, onShowDetail, characterId, onMusicPlay, onActionSelect, onMeetingInviteAction, displayContent, defaultTranslationExpanded = false, onFavoriteMedia }: MessageBubbleProps) {
     switch (msg.mediaType) {
         case "red_packet":
             return <RedPacketBubble msg={msg} charName={charName} userName={userName} groupSize={groupSize} onShowDetail={onShowDetail} />;
@@ -105,7 +106,7 @@ export const MessageBubble = memo(function MessageBubble({ msg, onUpdate, charNa
         case "app_card":
             return <AppCardBubble msg={msg} characterId={characterId} characterName={msg.senderName || charName} />;
         case "image":
-            return <ImageBubble msg={msg} onUpdate={onUpdate} characterId={characterId} />;
+            return <ImageBubble msg={msg} onUpdate={onUpdate} characterId={characterId} onFavorite={onFavoriteMedia} />;
         case "location":
             return <LocationBubble msg={msg} />;
         case "poke":
@@ -1336,10 +1337,12 @@ function ImageBubble({
     msg,
     onUpdate,
     characterId,
+    onFavorite,
 }: {
     msg: ChatMessage;
     onUpdate?: (updated: ChatMessage) => void;
     characterId?: string;
+    onFavorite?: (msg: ChatMessage) => void | Promise<void>;
 }) {
     const d = msg.mediaData;
     const label = d?.label || "照片";
@@ -1429,6 +1432,7 @@ function ImageBubble({
                     imageUrl={resolvedUrl || undefined}
                     description={!resolvedUrl ? label : undefined}
                     saveFilename={resolvedUrl ? ensureExtension(label, "image") : undefined}
+                    onFavorite={onFavorite ? () => onFavorite(msg) : undefined}
                     onRegenerate={canRegenerate ? () => { setShowPreview(false); openPromptEditor(); } : undefined}
                     regenerating={regenerating}
                     onClose={() => setShowPreview(false)}
@@ -1938,6 +1942,7 @@ export function MediaImageWithPreview({
     onError,
     onRegenerate,
     regenerating,
+    onFavorite,
 }: {
     url: string;
     title: string;
@@ -1945,6 +1950,7 @@ export function MediaImageWithPreview({
     onError?: () => void;
     onRegenerate?: () => void;
     regenerating?: boolean;
+    onFavorite?: () => void | Promise<void>;
 }) {
     const [preview, setPreview] = useState(false);
     const saveName = filename || title;
@@ -1960,6 +1966,7 @@ export function MediaImageWithPreview({
                 <MediaPreviewOverlay
                     imageUrl={url}
                     saveFilename={ensureExtension(saveName, "image")}
+                    onFavorite={onFavorite}
                     onRegenerate={onRegenerate ? () => { setPreview(false); onRegenerate(); } : undefined}
                     regenerating={regenerating}
                     onClose={() => setPreview(false)}
@@ -2391,7 +2398,7 @@ function synthesizeVoiceForMessage(msgId: string, characterId: string, speechTex
 function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpanded = false }: { msg: ChatMessage; characterId?: string; onUpdate?: (m: ChatMessage) => void; defaultTranslationExpanded?: boolean }) {
     const [playing, setPlaying] = useState(false);
     const [synthesizing, setSynthesizing] = useState(false);
-    const [synthFailed, setSynthFailed] = useState(false);
+    const [synthError, setSynthError] = useState<string | null>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
     const mountedRef = useRef(true);
     useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
@@ -2439,7 +2446,7 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
             return;
         }
         setSynthesizing(true);
-        setSynthFailed(false);
+        setSynthError(null);
         synthesizeVoiceForMessage(msg.id, characterId, speechText)
             .then((dataUrl) => {
                 if (onUpdate) onUpdate({ ...msg, mediaUrl: dataUrl, mediaData: { ...msg.mediaData, synthesizedFromText: speechText } });
@@ -2447,10 +2454,12 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
                 setSynthesizing(false);
                 playSrc(dataUrl);
             })
-            .catch(() => {
+            .catch((error: unknown) => {
                 if (!mountedRef.current) return;
                 setSynthesizing(false);
-                setSynthFailed(true);
+                const message = error instanceof Error ? error.message : String(error);
+                setSynthError(message);
+                window.alert(`语音合成失败：${message}`);
             });
     };
 
@@ -2465,7 +2474,7 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
     });
 
     return (
-        <div className="voice-msg-bubble" onClick={handlePlay}
+        <div className="voice-msg-bubble" onClick={handlePlay} title={synthError || undefined}
             style={{ minWidth: `${Math.min(60 + duration * 8, 220)}px` }}
         >
             <div className="voice-msg-icon-shell">
@@ -2488,7 +2497,7 @@ function VoiceMessageBubble({ msg, characterId, onUpdate, defaultTranslationExpa
                     />
                 ))}
             </div>
-            <span className="voice-msg-dur">{synthFailed ? "合成失败·点击重试" : `${duration}"`}</span>
+            <span className="voice-msg-dur">{synthError ? "合成失败·点击重试" : `${duration}"`}</span>
         </div>
     );
 }

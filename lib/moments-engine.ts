@@ -1197,17 +1197,20 @@ export function attachMomentPhotoInBackground(
 ): void {
     void (async () => {
         let photoUrl: string | undefined;
+        let photoGenerationPrompt: string | undefined;
         let errorMessage: string | undefined;
         let aborted = false;
         try {
-            photoUrl = await generateMomentPhotoUrl(description, characterId, useReferenceImage, useUserReferenceImage, signal);
+            const generated = await generateMomentPhotoUrl(description, characterId, useReferenceImage, useUserReferenceImage, signal);
+            photoUrl = generated?.url;
+            photoGenerationPrompt = generated?.prompt;
         } catch (error) {
             aborted = isAbortError(error);
             errorMessage = error instanceof Error ? error.message : String(error);
         }
         const reason = errorMessage || "生图配置未启用或生成失败";
         updateMomentPost(postId, photoUrl
-            ? { photoUrl, photoGenerationStatus: "generated", photoGenerationError: undefined }
+            ? { photoUrl, photoGenerationPrompt, photoGenerationStatus: "generated", photoGenerationError: undefined }
             : { photoGenerationStatus: "failed", photoGenerationError: reason });
         dispatchMomentsUpdated();
         // 失败时只在当下弹一次提示（卡片上不再挂红字），中断不算失败
@@ -1228,7 +1231,7 @@ export async function generateMomentPhotoUrl(
     useReferenceImage: boolean,
     useUserReferenceImage: boolean,
     signal?: AbortSignal,
-): Promise<string | undefined> {
+): Promise<{ url: string; prompt: string } | undefined> {
     try {
         throwIfAborted(signal);
         const generated = await generateImageFromConfiguredApi({
@@ -1243,7 +1246,7 @@ export async function generateMomentPhotoUrl(
         if (!generated) return undefined;
         const assetId = await saveChatImageToIndexedDB(generated.blob);
         throwIfAborted(signal);
-        return `asset://${assetId}`;
+        return { url: `asset://${assetId}`, prompt: generated.prompt };
     } catch (error) {
         if (isAbortError(error)) throw error;
         console.warn("[Moments] Image generation failed:", error);

@@ -12,10 +12,16 @@ export type VoiceApiConfigResolved = VoiceApiConfig;
 export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): VoiceApiConfig | null {
     const bindings = loadBindingConfig();
     const slot = resolveBinding(bindings, characterId, appId ?? "chat");
-    if (!slot.voiceConfigId) return null;
-
     const configs = loadVoiceConfigs();
-    return configs.find(c => c.id === slot.voiceConfigId) || null;
+    if (slot.voiceConfigId) {
+        const bound = configs.find(c => c.id === slot.voiceConfigId);
+        return bound?.enableTTS === false ? null : bound || null;
+    }
+
+    // 只有一个启用的方案时自动兜底，避免“设置页试听成功、聊天却提示未绑定”。
+    // 多个方案仍要求用户显式绑定，防止角色误用其他人的音色。
+    const enabledConfigs = configs.filter(config => config.enableTTS !== false);
+    return enabledConfigs.length === 1 ? enabledConfigs[0] : null;
 }
 
 /**
@@ -25,6 +31,7 @@ export function resolveVoiceConfig(characterId: string, appId?: ContentAppId): V
  * Supported providers:
  * - Minimax: REST API → hex-encoded mp3
  * - OpenAI: REST API → binary audio blob
+ * - FishAudio / ElevenLabs: proxied REST API → binary audio blob
  */
 export async function synthesizeSpeech(
     text: string,
@@ -43,7 +50,34 @@ export async function synthesizeSpeech(
         return synthesizeOpenAI(text, voiceConfig);
     }
 
+    if (provider === "FishAudio" || provider === "ElevenLabs") {
+        return synthesizeExternalVoice(text, voiceConfig);
+    }
+
     return null;
+}
+
+async function synthesizeExternalVoice(text: string, config: VoiceApiConfig): Promise<Blob | null> {
+    if (!config.apiKey) throw new Error(`${config.provider} API Key 未配置`);
+    if (!config.defaultVoice.trim()) throw new Error(`${config.provider} Voice ID 未配置`);
+    const response = await fetchWithTimeout("/api/voice/synthesize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            provider: config.provider,
+            apiKey: config.apiKey,
+            text,
+            voiceId: config.defaultVoice,
+            model: config.model,
+            speechSpeed: config.speechSpeed,
+        }),
+    });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { message?: string; error?: string };
+        throw new Error(data.message || data.error || `${config.provider} API 请求失败 (${response.status})`);
+    }
+    const blob = await response.blob();
+    return new Blob([await blob.arrayBuffer()], { type: response.headers.get("content-type") || "audio/mpeg" });
 }
 
 // A stalled TTS request (TCP connected but no response — cold start, rate-limit

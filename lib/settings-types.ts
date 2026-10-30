@@ -24,7 +24,17 @@ export type WorldBookEntry = {
 };
 
 export type WorldBookConfig = SettingItemMeta & {
+    /** 仅用于世界书管理页收纳；不参与绑定、触发或提示词组装。 */
+    folderId?: string;
     entries: WorldBookEntry[];
+};
+
+export type WorldBookFolder = {
+    id: string;
+    name: string;
+    order: number;
+    createdAt: number;
+    updatedAt: number;
 };
 
 // --- Preset ---
@@ -234,6 +244,9 @@ export type NovelAiPreset = {
 export type NovelAiSettings = {
     apiKey: string;
     requestMode?: ImageGenerationRequestMode;
+    /** 关闭时使用 NovelAI 官方生图地址；开启时直接请求 customUrl。 */
+    customUrlEnabled?: boolean;
+    customUrl?: string;
     activePresetId: string;
     presets: NovelAiPreset[];
 };

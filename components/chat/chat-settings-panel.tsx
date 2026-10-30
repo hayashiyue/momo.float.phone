@@ -334,6 +334,7 @@ export function ChatSettingsPanel({
     const [videoBackground, setVideoBackground] = useState<string>(session.videoBackground || "");
     const [voiceBackground, setVoiceBackground] = useState<string>(session.voiceBackground || "");
     const [isPinned, setIsPinned] = useState(session.isPinned || false);
+    const [allowForcedOfflineStory, setAllowForcedOfflineStory] = useState(session.allowForcedOfflineStory === true);
     // 仿真拉黑：拉黑期间用户发出的消息会被对方拒收（仿微信红色感叹号）
     const [isBlacklisted, setIsBlacklisted] = useState(session.isBlacklisted || false);
     // 自定义状态栏（状态区）
@@ -1319,6 +1320,18 @@ export function ChatSettingsPanel({
 
                 {/* Toggles */}
                 <div className="menu-group">
+                    {!session.isGroup && (
+                        <div className="menu-item">
+                            <ChatInfoIcon icon={Sparkles} color={CONTENT_APP_ACCENTS.story} />
+                            <div className="menu-label-group">
+                                <span className="menu-label">允许强制开启线下剧情</span>
+                                <span className="menu-desc">角色非常渴望见面、准备惊喜或主动推进见面时，可直接创建衔接记忆分线并进入剧情</span>
+                            </div>
+                            <div className="menu-right">
+                                <Toggle checked={allowForcedOfflineStory} onChange={c => { setAllowForcedOfflineStory(c); updateSession({ allowForcedOfflineStory: c }); }} />
+                            </div>
+                        </div>
+                    )}
                     <div className="menu-item">
                         <ChatInfoIcon icon={Pin} color={BINDING_ACCENTS.preset} />
                         <div className="menu-label-group"><span className="menu-label">置顶聊天</span></div>

@@ -395,8 +395,12 @@ export type StoryCharacterSettings = {
   activeProseStyleSchemeId?: string;
   /** 当前角色启用的状态栏方案（存于公用方案仓库），仅保存选择。 */
   activeStatusSchemeId?: string;
+  /** 是否把状态栏方案的生成要求加入剧情提示词；缺省为开启。 */
+  statusGenerationEnabled?: boolean;
   /** 当前角色启用的小剧场方案（存于公用方案仓库），仅保存选择。 */
   activeTheaterSchemeId?: string;
+  /** 是否把小剧场方案的生成要求加入剧情提示词；缺省为开启。 */
+  theaterGenerationEnabled?: boolean;
   /** @deprecated 旧版按角色保存的文风方案列表；已迁移进公用方案仓库。 */
   proseStyleSchemes?: StoryProseStyleScheme[];
   /** @deprecated 旧版按角色保存的状态栏方案列表；已迁移进公用方案仓库。 */
@@ -432,6 +436,14 @@ export type StorySession = {
   branchId?: string;
   branchName?: string;
   branchOrder?: number;
+  /** 由自定义 APP 管理的开场候选集；用于在剧情主线与开场存档之间安全切换。 */
+  openingSetId?: string;
+  /** 当前会话对应的开场候选项。 */
+  openingId?: string;
+  /** 开场切换时自动保存的隐藏存档，不直接展示在剧情分线目录。 */
+  openingArchive?: boolean;
+  /** 隐藏于剧情分线目录；转为正式分线后会被清除。 */
+  hiddenFromBranchList?: boolean;
   createdAt?: string;
   /** 新分线是否允许读取创建前的最近记忆；开启后由 UI 锁定，避免反复改变语义。 */
   inheritRecentMemory?: boolean;
@@ -783,7 +795,10 @@ export function getStorySessionOwnerKey(session: Pick<StorySession, "characterId
 
 export function loadStorySessionsForOwner(ownerType: StoryOwnerType, ownerId: string): StorySession[] {
   return loadStorySessions()
-    .filter((session) => getStorySessionOwnerKey(session) === `${ownerType}:${ownerId}`)
+    .filter((session) => (
+      getStorySessionOwnerKey(session) === `${ownerType}:${ownerId}`
+      && session.hiddenFromBranchList !== true
+    ))
     .sort((a, b) => (a.branchOrder ?? 0) - (b.branchOrder ?? 0) || (a.createdAt || "").localeCompare(b.createdAt || ""));
 }
 
@@ -855,7 +870,7 @@ export type MergeStoryBranchesResult = {
 };
 
 /**
- * 将允许继承记忆、或已显式写入记忆的分线按原始时间并入主线。
+ * 将用户选择的普通分线按原始时间并入主线。
  * 来源分线保留在目录中，但标记为已合并；其投影随后不再重复注入。
  */
 export function mergeStoryBranchesIntoMain(ownerType: StoryOwnerType, ownerId: string, sourceSessionIds: string[]): MergeStoryBranchesResult {
@@ -864,7 +879,7 @@ export function mergeStoryBranchesIntoMain(ownerType: StoryOwnerType, ownerId: s
   if (!main) return { mergedSessionIds: [], skippedSessionIds: sourceSessionIds, copiedMessageCount: 0 };
   const requested = new Set(sourceSessionIds);
   const sources = sessions.filter((session) => requested.has(session.id) && (session.branchId || "main") !== "main");
-  const eligible = sources.filter((session) => !session.mergedIntoMainAt && (session.inheritRecentMemory || Boolean(session.includedInMemoryAt)));
+  const eligible = sources.filter((session) => !session.independentStory && !session.mergedIntoMainAt);
   const skippedSessionIds = sources.filter((session) => !eligible.includes(session)).map((session) => session.id);
   const existing = loadStoryMessages(main.id);
   const copied = eligible.flatMap((source) => loadStoryMessages(source.id).map((message) => ({

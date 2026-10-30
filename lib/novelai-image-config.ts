@@ -47,6 +47,25 @@ export const NOVELAI_NOISE_SCHEDULE_OPTIONS = [
 const resolutionValues = new Set<string>(NOVELAI_RESOLUTION_OPTIONS.map(option => option.value));
 const samplerValues = new Set<string>(NOVELAI_SAMPLER_OPTIONS.map(option => option.value));
 const noiseScheduleValues = new Set<string>(NOVELAI_NOISE_SCHEDULE_OPTIONS.map(option => option.value));
+const NOVELAI_MIN_DIMENSION = 64;
+const NOVELAI_MAX_DIMENSION = 4096;
+
+function parseResolution(value: unknown): { value: string; width: number; height: number } | null {
+  if (typeof value !== "string") return null;
+  const match = /^\s*(\d{2,4})\s*[xX×]\s*(\d{2,4})\s*$/.exec(value);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (
+    !Number.isInteger(width)
+    || !Number.isInteger(height)
+    || width < NOVELAI_MIN_DIMENSION
+    || height < NOVELAI_MIN_DIMENSION
+    || width > NOVELAI_MAX_DIMENSION
+    || height > NOVELAI_MAX_DIMENSION
+  ) return null;
+  return { value: `${width}x${height}`, width, height };
+}
 
 export function isValidNovelAiModel(value: string): boolean {
   return value.length <= 128 && /^[a-z0-9][a-z0-9._:-]*$/i.test(value);
@@ -58,20 +77,15 @@ export function normalizeNovelAiModel(value: unknown): string {
 }
 
 export function isNovelAiResolution(value: string): boolean {
-  return resolutionValues.has(value);
+  return resolutionValues.has(value) || parseResolution(value) !== null;
 }
 
 export function normalizeNovelAiResolution(value: unknown): string {
-  return typeof value === "string" && isNovelAiResolution(value)
-    ? value
-    : NOVELAI_DEFAULT_RESOLUTION;
+  return parseResolution(value)?.value ?? NOVELAI_DEFAULT_RESOLUTION;
 }
 
 export function getNovelAiResolution(value: unknown): { value: string; width: number; height: number } {
-  const normalized = normalizeNovelAiResolution(value);
-  const option = NOVELAI_RESOLUTION_OPTIONS.find(item => item.value === normalized)
-    ?? NOVELAI_RESOLUTION_OPTIONS[0];
-  return { value: option.value, width: option.width, height: option.height };
+  return parseResolution(value) ?? parseResolution(NOVELAI_DEFAULT_RESOLUTION)!;
 }
 
 export function isNovelAiSampler(value: string): boolean {

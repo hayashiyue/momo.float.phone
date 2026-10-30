@@ -53,7 +53,7 @@ import { useKeyboardDismissAutoSend } from "@/components/chat/use-keyboard-dismi
 import { cancelBailoutKey } from "@/lib/push-bailout-client";
 import { PENDING_REPLY_PREFIX } from "@/lib/friend-request-engine";
 import type { UserIdentity } from "@/components/settings/user-identity";
-import { AlertCircle, Blocks, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
+import { AlertCircle, Blocks, Bookmark, Check, Trash2, User, ChevronLeft, ChevronRight, Clapperboard, Clock, Gift, Languages, Loader2, MoreHorizontal, X } from "lucide-react";
 import { setDebugChatState } from "@/lib/debug-store";
 import { SessionCustomCSS } from "@/components/ui/session-custom-css";
 import { setChatActive } from "@/lib/music-action-queue";
@@ -89,6 +89,7 @@ import { extractTextToolDirectiveText } from "@/lib/text-tool-protocol";
 import { emitChatPluginEvent, getChatPluginHookBus, runChatPluginTransform } from "@/lib/chat-plugin-hooks";
 import { CHAT_PLUGIN_TOAST_EVENT, getChatPluginRuntime } from "@/lib/chat-plugin-runtime";
 import { ChatPluginSlot } from "@/components/chat/chat-plugin-slot";
+import { addChatFavorite } from "@/lib/favorites-storage";
 import {
     createOrGetStorySession,
     hydrateStoryStorage,
@@ -103,6 +104,24 @@ import {
 // Call messages are stored with user/assistant role for correct prompt alternation,
 // but should render as centered system notifications in the UI.
 const CALL_SYS_RE = /\[我(?:向.+)?(?:发起了|挂断了|拒绝了|取消了)(?:群?(?:语音|视频)通话)/;
+const FORCED_STORY_RE = /\[强制开启线下剧情\s*[:：]\s*([^\]]{1,500})\]/g;
+const FORCED_STORY_CAPABILITY_PROMPT = `【自主开启线下剧情能力】
+只有当你非常渴望立刻见到用户、决定亲自制造惊喜，或当前对话自然发展到必须立刻线下见面的程度时，才可以自主开启线下剧情。此能力必须克制使用，普通邀约仍使用原有邀请方式。
+决定直接进入线下剧情时，在本次回复最后额外输出且只输出一次：[强制开启线下剧情:用一句话描述见面地点、行动和衔接场景]
+该标记是隐藏控制指令，不要解释标记，也不要假装用户已经同意、替用户说话或替用户决定反应。`;
+
+function extractForcedStoryTrigger(text: string): { text: string; description?: string } {
+    let description = "";
+    const cleaned = text.replace(FORCED_STORY_RE, (_match, value: string) => {
+        if (!description) description = value.replace(/[\r\n]+/g, " ").trim().slice(0, 500);
+        return "";
+    }).replace(/\n{3,}/g, "\n\n").trim();
+    return { text: cleaned, description: description || undefined };
+}
+
+function stripForcedStoryPreview(text: string): string {
+    return text.replace(/\[强制开启线下剧情[\s\S]*$/g, "").trimEnd();
+}
 function isCallSysMsg(msg: ChatMessage): boolean {
     return CALL_SYS_RE.test(msg.content);
 }
@@ -1149,6 +1168,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     const [enterToSendEnabled, setEnterToSendEnabled] = useState(() => loadChatAppSettings().enterToSendEnabled === true);
     const [storyEntryEnabled, setStoryEntryEnabled] = useState(() => loadChatAppSettings().storyAsOfflineMode === true);
     const [storyEntryMigrationOpen, setStoryEntryMigrationOpen] = useState(false);
+    const [forcedStoryTransition, setForcedStoryTransition] = useState(false);
+    const forcedStoryLaunchingRef = useRef(false);
     const [chatAppSettingsRevision, setChatAppSettingsRevision] = useState(0);
 
     // Rich media input modals
@@ -2860,6 +2881,42 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         }
     };
 
+    const launchForcedOfflineStory = async (description: string) => {
+        if (session.isGroup || forcedStoryLaunchingRef.current) return;
+        forcedStoryLaunchingRef.current = true;
+        setForcedStoryTransition(true);
+        try {
+            await hydrateStoryStorage();
+            const characterId = session.contactId;
+            const characterName = character?.name || "角色";
+            const mainSession = loadStorySessionsForOwner("single", characterId)
+                .find((item) => (item.branchId || "main") === "main")
+                || createOrGetStorySession(characterId, { ownerType: "single", ownerId: characterId, branchId: "main" });
+            const now = new Date();
+            const branchName = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+            const storySession = createOrGetStorySession(characterId, {
+                ownerType: "single",
+                ownerId: characterId,
+                participantIds: [characterId],
+                branchId: `forced_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                branchName,
+                inheritRecentMemory: true,
+                independentStory: false,
+                baseSession: mainSession,
+            });
+            const requestedAt = new Date().toISOString();
+            const launchPrompt = `${characterName}在刚才的私聊中自主决定立刻与${userIdentity?.name || "用户"}进入线下剧情。衔接场景：${description}。请读取最近私聊与角色记忆，从当前对话自然衔接并由${characterName}主动开启现场剧情；不得替用户决定言行或反应。`;
+            updateStorySession(storySession.id, { autoStartPrompt: launchPrompt, autoStartRequestedAt: requestedAt });
+            saveStoryLaunchTarget({ ...storySession, autoStartPrompt: launchPrompt, autoStartRequestedAt: requestedAt });
+            await new Promise((resolve) => window.setTimeout(resolve, 700));
+            window.dispatchEvent(new CustomEvent("open-app", { detail: { appId: "story" } }));
+        } catch (error) {
+            setForcedStoryTransition(false);
+            forcedStoryLaunchingRef.current = false;
+            showChatToast(error instanceof Error ? error.message : "自主线下剧情创建失败，请稍后再试");
+        }
+    };
+
     // Helper: Split AI response by \n\n into multiple messages (online chat mode)
     // Uses shared parseAIResponse for rich-media support.
     // Returns { hasVisible, stateValues, hasDecline } — hasVisible is false if the AI chose [静默].
@@ -2875,7 +2932,15 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     ): Promise<{ hasVisible: boolean; stateValues: StateValue[]; triggerCall?: "voice" | "video"; hasDecline?: boolean }> => {
         throwIfGenerationStopped(options);
         const responseBatchId = options?.responseBatchId || createResponseBatchId();
-        const rawResponseText = options?.rawResponseText ?? aiResponseText;
+        const forcedStoryEnabled = !session.isGroup
+            && loadChatSessions().find((item) => item.id === session.id)?.allowForcedOfflineStory === true;
+        const forcedStory = forcedStoryEnabled
+            ? extractForcedStoryTrigger(aiResponseText)
+            : { text: aiResponseText, description: undefined };
+        aiResponseText = forcedStory.text;
+        const rawResponseText = options?.rawResponseText
+            ? extractForcedStoryTrigger(options.rawResponseText).text
+            : aiResponseText;
         const previousState = session.isGroup
             ? getLatestStateValues(session.id)
             : getLatestCharacterStateValues(session.contactId);
@@ -2991,6 +3056,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 });
                 setMessages(prev => [...prev, aiMsg]);
             }
+            if (forcedStory.description) void launchForcedOfflineStory(forcedStory.description);
             return { hasVisible: false, stateValues, triggerCall, hasDecline };
         }
 
@@ -3103,6 +3169,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
             await Promise.allSettled(imageReplacementTasks);
             throwIfGenerationStopped(options);
         }
+        if (forcedStory.description) void launchForcedOfflineStory(forcedStory.description);
         return { hasVisible: true, stateValues, triggerCall, hasDecline };
     };
 
@@ -3327,7 +3394,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
 
         try {
             const trimmedRetryInstruction = retryInstruction?.trim();
-            const generationHistory: ChatMessage[] = trimmedRetryInstruction
+            let generationHistory: ChatMessage[] = trimmedRetryInstruction
                 ? [...history, {
                     id: `_instruction_retry_${Date.now()}`,
                     sessionId: session.id,
@@ -3337,6 +3404,17 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                     createdAt: new Date().toISOString(),
                 }]
                 : history;
+            const latestSession = loadChatSessions().find((item) => item.id === session.id);
+            if (!session.isGroup && latestSession?.allowForcedOfflineStory === true) {
+                generationHistory = [...generationHistory, {
+                    id: `_forced_story_capability_${Date.now()}`,
+                    sessionId: session.id,
+                    role: "system",
+                    content: FORCED_STORY_CAPABILITY_PROMPT,
+                    status: "sent",
+                    createdAt: new Date().toISOString(),
+                }];
+            }
             if (session.isGroup) {
                 let roundReasoning: string | undefined;
                 const results = await generateGroupChatCompletion(
@@ -3399,7 +3477,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                             streamParseFrameRef.current = window.requestAnimationFrame(() => {
                                 streamParseFrameRef.current = 0;
                                 if (!isCurrentGeneration()) return;
-                                setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(streamAccumRef.current, { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
+                                setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                             });
                         },
                         onTextPart: () => {
@@ -3685,7 +3763,18 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         streamAccumRef.current = "";
         setStreamPreview(null);
         try {
-            const latestMessages = loadChatMessages(session.id);
+            let latestMessages = loadChatMessages(session.id);
+            const latestSession = loadChatSessions().find((item) => item.id === session.id);
+            if (!session.isGroup && latestSession?.allowForcedOfflineStory === true) {
+                latestMessages = [...latestMessages, {
+                    id: `_forced_story_capability_${Date.now()}`,
+                    sessionId: session.id,
+                    role: "system",
+                    content: FORCED_STORY_CAPABILITY_PROMPT,
+                    status: "sent",
+                    createdAt: new Date().toISOString(),
+                }];
+            }
             if (session.isGroup) {
                 const streamedImageReplacementTasks: Promise<unknown>[] = [];
                 // 每轮 LLM 调用的思维链：中间轮挂到该轮首条气泡，最终轮传给 processGroupParts
@@ -3876,7 +3965,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                         streamParseFrameRef.current = window.requestAnimationFrame(() => {
                             streamParseFrameRef.current = 0;
                             if (!isCurrentGeneration()) return;
-                            setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(streamAccumRef.current, { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
+                            setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                         });
                     },
                     onTextPart: async (text, _senderInfo, options) => {
@@ -5149,6 +5238,21 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         return "displaySourceId" in msg && msg.displaySourceId ? msg.displaySourceId : msg.id;
     };
 
+    const favoriteStoredMessages = async (messageIds: string[]) => {
+        const targets = new Set(messageIds);
+        const storedMessages = loadChatMessages(session.id).filter(message => targets.has(message.id));
+        if (storedMessages.length === 0) {
+            showChatToast("没有找到可收藏的消息");
+            return;
+        }
+        try {
+            await addChatFavorite({ session, messages: storedMessages });
+            showChatToast(storedMessages.length > 1 ? `已收藏 ${storedMessages.length} 条消息` : "已收藏");
+        } catch (error) {
+            showChatToast(error instanceof Error ? error.message : "收藏失败");
+        }
+    };
+
     /** Reusable context menu for user/assistant bubbles */
     const renderBubbleContextMenu = (m: ChatMessage, options?: { allowMultiSelect?: boolean }) => {
         const storedMessageId = getStoredActionMessageId(m);
@@ -5197,6 +5301,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                 </div>
                 <div className="flex">
                     <button onClick={() => { setQuotingMessage(m); setActiveMessageId(null); }} className="ctx-menu-btn">引用</button>
+                    <button onClick={() => { setActiveMessageId(null); void favoriteStoredMessages([storedMessageId]); }} className="ctx-menu-btn">收藏</button>
                     {options?.allowMultiSelect !== false && (
                         <button onClick={() => startMultiSelectFromMessage(m)} className="ctx-menu-btn">多选</button>
                     )}
@@ -6337,6 +6442,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                                 groupSize={session.isGroup ? (session.participantIds?.length || 0) + (session.isSpectator ? 0 : 1) : undefined}
                                                 onShowDetail={setMediaDetailMsg}
                                                 characterId={msg.senderCharacterId || session.contactId}
+                                                onFavoriteMedia={() => void favoriteStoredMessages([getStoredActionMessageId(msg)])}
                                                 onUpdate={(updated) => setMessages(prev => prev.map(m => m.id === updated.id ? updated : m))}
                                                 onSystemMessage={(text) => {
                                                     const sysMsg = pushChatMessage({
@@ -6532,6 +6638,18 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                                 : `实际删除 ${multiDeleteTargetIds.length} 条`}
                         </span>
                     </div>
+                    <button
+                        type="button"
+                        className="chat-multi-select-delete-btn chat-multi-select-favorite-btn"
+                        disabled={selectedMessageIds.size === 0}
+                        onClick={async () => {
+                            await favoriteStoredMessages(Array.from(selectedMessageIds));
+                            cancelMultiSelect();
+                        }}
+                    >
+                        <Bookmark size={18} strokeWidth={1.8} />
+                        收藏
+                    </button>
                     <button
                         type="button"
                         className="chat-multi-select-delete-btn"
@@ -6853,6 +6971,16 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
                             <span className="menu-label-group"><span className="menu-label">传送到新的剧情分线</span><span className="menu-desc">完整迁移用户与角色消息；不推荐再合并进主线</span></span>
                         </button>
                         <button type="button" className="ui-btn ui-btn-ghost w-full" onClick={() => setStoryEntryMigrationOpen(false)}>取消</button>
+                    </div>
+                </div>
+            )}
+
+            {forcedStoryTransition && (
+                <div className="modal-overlay" data-ui="modal" role="dialog" aria-modal="true" aria-label="正在进入线下剧情">
+                    <div className="modal-dialog items-center text-center">
+                        <Loader2 size={30} className="animate-spin text-[var(--c-accent)]" />
+                        <span className="modal-header-title">TA自主开启了线下剧情</span>
+                        <p className="menu-desc">正在创建衔接记忆分线并进入……</p>
                     </div>
                 </div>
             )}

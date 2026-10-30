@@ -2,6 +2,7 @@ import type {
     GenerationParameterKey,
     PresetConfig,
     WorldBookConfig,
+    WorldBookFolder,
     WorldBookEntry,
     RegexConfig,
     RegexRule,
@@ -423,6 +424,26 @@ export function saveWorldBooks(books: WorldBookConfig[]): void {
     writeWorldBooksCache(books);
 }
 
+const WORLD_BOOK_FOLDERS_KEY = "settings_worldbook_folders_v1";
+
+export function loadWorldBookFolders(): WorldBookFolder[] {
+    if (typeof window === "undefined") return [];
+    try {
+        const parsed = JSON.parse(kvGet(WORLD_BOOK_FOLDERS_KEY) || "[]") as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+            .filter((item): item is WorldBookFolder => Boolean(item && typeof item === "object" && typeof (item as WorldBookFolder).id === "string" && typeof (item as WorldBookFolder).name === "string"))
+            .sort((left, right) => left.order - right.order || left.createdAt - right.createdAt);
+    } catch {
+        return [];
+    }
+}
+
+export function saveWorldBookFolders(folders: WorldBookFolder[]): void {
+    if (typeof window === "undefined") return;
+    kvSet(WORLD_BOOK_FOLDERS_KEY, JSON.stringify(folders));
+}
+
 export function createWorldBook(name: string): WorldBookConfig {
     const now = getNow();
     return {
@@ -728,6 +749,8 @@ export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
     novelai: {
         apiKey: "",
         requestMode: "direct",
+        customUrlEnabled: false,
+        customUrl: "",
         activePresetId: DEFAULT_NOVELAI_PRESET.id,
         presets: [DEFAULT_NOVELAI_PRESET],
     },
@@ -888,6 +911,8 @@ function normalizeImageGenerationSettings(settings: Partial<ImageGenerationSetti
         requestMode: rawNai?.requestMode === "server" || rawNai?.requestMode === "direct"
             ? rawNai.requestMode
             : requestMode,
+        customUrlEnabled: rawNai?.customUrlEnabled === true,
+        customUrl: typeof rawNai?.customUrl === "string" ? rawNai.customUrl.trim() : "",
         activePresetId,
         presets: naiPresets,
     };
