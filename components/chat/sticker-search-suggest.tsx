@@ -6,7 +6,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { STICKER_PACKS } from "@/lib/sticker-data";
-import { loadStickerPacksForCharacters, resolvePackStickerMap } from "@/lib/custom-sticker-storage";
+import { loadStickerPacksForCharacters } from "@/lib/custom-sticker-storage";
+import { getThemeAssetMap } from "@/lib/theme-storage";
 
 export type StickerSearchItem = {
   key: string;
@@ -39,35 +40,22 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
     return () => window.clearTimeout(timer);
   }, [query]);
 
-  // ── 加载自定义贴纸（按会话角色绑定的包），解析出 name → url ──
-  const [customItems, setCustomItems] = useState<StickerSearchItem[]>([]);
-  const loadSeqRef = useRef(0);
-  useEffect(() => {
-    const seq = ++loadSeqRef.current;
-    let cancelled = false;
-    (async () => {
-      const packs = loadStickerPacksForCharacters(characterIds).filter((pack) => pack.stickers.length > 0);
-      const urlByName: Record<string, string> = {};
-      for (const pack of packs) {
-        const map = await resolvePackStickerMap(pack);
-        for (const [name, url] of Object.entries(map)) {
-          if (url) urlByName[name] = url;
-        }
+  // ── 仅在内存中读取自定义贴纸元数据（0 IndexedDB 开销），命中搜索词后再按需解析那几张图片 ──
+  const customMetaItems = useMemo(() => {
+    const packs = loadStickerPacksForCharacters(characterIds).filter((pack) => pack.stickers.length > 0);
+    const items: Array<StickerSearchItem & { assetId?: string; externalUrl?: string }> = [];
+    for (const pack of packs) {
+      for (const sticker of pack.stickers) {
+        items.push({
+          key: `custom:${pack.id}:${sticker.id}`,
+          name: sticker.name,
+          assetId: sticker.assetId,
+          externalUrl: sticker.externalUrl,
+          url: sticker.externalUrl,
+        });
       }
-      if (cancelled) return;
-      const items: StickerSearchItem[] = [];
-      for (const pack of packs) {
-        for (const sticker of pack.stickers) {
-          items.push({ key: `custom:${pack.id}:${sticker.id}`, name: sticker.name, url: urlByName[sticker.name] });
-        }
-      }
-      setCustomItems(items);
-    })();
-    return () => {
-      cancelled = true;
-      // 只清理最后一次加载，避免竞态时旧结果覆盖新结果
-      if (loadSeqRef.current === seq) setCustomItems([]);
-    };
+    }
+    return items;
   }, [characterIds]);
 
   // ── 内置表情包（emoji 兜底） ──
@@ -80,7 +68,7 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
   );
 
   // ── 模糊匹配 + 排序（前缀优先，再包含；同名去重，自定义优先） ──
-  const results = useMemo(() => {
+  const matchedItems = useMemo(() => {
     const q = debouncedQuery.toLowerCase();
     if (!q) return [];
     const rank = (name: string): number => {
@@ -90,12 +78,12 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
       if (n.includes(q)) return 2;
       return -1;
     };
-    const scored = [...customItems, ...builtinItems]
+    const scored = [...customMetaItems, ...builtinItems]
       .map((item) => ({ item, rank: rank(item.name) }))
       .filter((entry) => entry.rank >= 0)
       .sort((a, b) => a.rank - b.rank || a.item.name.length - b.item.name.length);
     const seen = new Set<string>();
-    const out: StickerSearchItem[] = [];
+    const out: Array<StickerSearchItem & { assetId?: string; externalUrl?: string }> = [];
     for (const { item } of scored) {
       if (seen.has(item.name)) continue;
       seen.add(item.name);
@@ -103,7 +91,34 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
       if (out.length >= MAX_RESULTS) break;
     }
     return out;
-  }, [debouncedQuery, builtinItems, customItems]);
+  }, [debouncedQuery, builtinItems, customMetaItems]);
+
+  const [resolvedAssetMap, setResolvedAssetMap] = useState<Record<string, string>>({});
+  const loadSeqRef = useRef(0);
+  useEffect(() => {
+    const neededAssetIds = matchedItems
+      .map((item) => item.assetId)
+      .filter((id): id is string => Boolean(id && !resolvedAssetMap[id]));
+    if (neededAssetIds.length === 0) return;
+    const seq = ++loadSeqRef.current;
+    let cancelled = false;
+    getThemeAssetMap(neededAssetIds).then((map) => {
+      if (cancelled || loadSeqRef.current !== seq) return;
+      setResolvedAssetMap((prev) => ({ ...prev, ...map }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [matchedItems, resolvedAssetMap]);
+
+  const results = useMemo<StickerSearchItem[]>(() => {
+    return matchedItems.map((item) => ({
+      key: item.key,
+      name: item.name,
+      emoji: item.emoji,
+      url: item.externalUrl || (item.assetId ? resolvedAssetMap[item.assetId] : item.url),
+    }));
+  }, [matchedItems, resolvedAssetMap]);
 
   if (!debouncedQuery || results.length === 0) return null;
 

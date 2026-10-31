@@ -78,21 +78,46 @@ function runTransactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
+let _themeDbPromise: Promise<IDBDatabase | null> | null = null;
+const _assetDataUrlCache = new Map<string, string>();
+const MAX_ASSET_CACHE_SIZE = 60;
+
+function cacheAssetDataUrl(id: string, dataUrl: string): void {
+  if (!id || !dataUrl) return;
+  if (_assetDataUrlCache.has(id)) _assetDataUrlCache.delete(id);
+  else if (_assetDataUrlCache.size >= MAX_ASSET_CACHE_SIZE) {
+    const oldest = _assetDataUrlCache.keys().next().value;
+    if (oldest !== undefined) _assetDataUrlCache.delete(oldest);
+  }
+  _assetDataUrlCache.set(id, dataUrl);
+}
+
 async function openThemeDb(): Promise<IDBDatabase | null> {
   if (!hasBrowserApi()) {
     return null;
   }
+  if (_themeDbPromise) return _themeDbPromise;
 
   // Open at >= THEME_DB_VERSION: a backup restore may have bumped the stored
   // version higher, and opening at a fixed lower version would throw a VersionError.
-  return openIndexedDbAtLeast(THEME_DB_NAME, THEME_DB_VERSION, (database) => {
+  _themeDbPromise = openIndexedDbAtLeast(THEME_DB_NAME, THEME_DB_VERSION, (database) => {
     if (!database.objectStoreNames.contains(THEME_ASSET_STORE)) {
       database.createObjectStore(THEME_ASSET_STORE, { keyPath: "id" });
     }
   }).then((database) => {
-    database.onversionchange = () => database.close();
+    database.onversionchange = () => {
+      database.close();
+      _themeDbPromise = null;
+    };
+    database.onclose = () => {
+      _themeDbPromise = null;
+    };
     return database;
-  }).catch(() => null);
+  }).catch(() => {
+    _themeDbPromise = null;
+    return null;
+  });
+  return _themeDbPromise;
 }
 
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -208,19 +233,16 @@ function createThemeAssetId(type: ThemeAssetType): string {
 }
 
 async function saveAssetRecord(record: ThemeAssetRecord): Promise<void> {
+  cacheAssetDataUrl(record.id, record.dataUrl);
   const database = await openThemeDb();
   if (!database) {
     return;
   }
 
-  try {
-    const transaction = database.transaction(THEME_ASSET_STORE, "readwrite");
-    const store = transaction.objectStore(THEME_ASSET_STORE);
-    store.put(record);
-    await runTransactionDone(transaction);
-  } finally {
-    database.close();
-  }
+  const transaction = database.transaction(THEME_ASSET_STORE, "readwrite");
+  const store = transaction.objectStore(THEME_ASSET_STORE);
+  store.put(record);
+  await runTransactionDone(transaction);
 }
 
 async function readAssetRecord(id: string): Promise<ThemeAssetRecord | null> {
@@ -229,18 +251,19 @@ async function readAssetRecord(id: string): Promise<ThemeAssetRecord | null> {
     return null;
   }
 
-  try {
-    const transaction = database.transaction(THEME_ASSET_STORE, "readonly");
-    const store = transaction.objectStore(THEME_ASSET_STORE);
-    const result = await runRequest(store.get(id));
-    await runTransactionDone(transaction);
-    return (result as ThemeAssetRecord | undefined) ?? null;
-  } finally {
-    database.close();
-  }
+  const transaction = database.transaction(THEME_ASSET_STORE, "readonly");
+  const store = transaction.objectStore(THEME_ASSET_STORE);
+  const result = await runRequest(store.get(id));
+  await runTransactionDone(transaction);
+  const rec = (result as ThemeAssetRecord | undefined) ?? null;
+  if (rec?.id && rec.dataUrl) cacheAssetDataUrl(rec.id, rec.dataUrl);
+  return rec;
 }
 
 export async function getThemeAssetDataUrl(id: string): Promise<string | null> {
+  if (!id) return null;
+  const cached = _assetDataUrlCache.get(id);
+  if (cached) return cached;
   const record = await readAssetRecord(id);
   return record?.dataUrl ?? null;
 }
@@ -248,29 +271,35 @@ export async function getThemeAssetDataUrl(id: string): Promise<string | null> {
 export async function getThemeAssetMap(ids: string[]): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
-  const storedIds = uniqueIds.filter((id) => !/^(?:https?:|data:|blob:)/i.test(id));
+  const uncachedIds: string[] = [];
   uniqueIds.forEach((id) => {
-    if (/^(?:https?:|data:|blob:)/i.test(id)) map[id] = id;
+    if (/^(?:https?:|data:|blob:)/i.test(id)) {
+      map[id] = id;
+      return;
+    }
+    const cached = _assetDataUrlCache.get(id);
+    if (cached) {
+      map[id] = cached;
+    } else {
+      uncachedIds.push(id);
+    }
   });
-  if (storedIds.length === 0) return map;
+  if (uncachedIds.length === 0) return map;
   const database = await openThemeDb();
   if (!database) return map;
-  try {
-    const transaction = database.transaction(THEME_ASSET_STORE, "readonly");
-    const store = transaction.objectStore(THEME_ASSET_STORE);
-    const rows = await Promise.all(
-      storedIds.map((id) => runRequest(store.get(id)).catch(() => undefined))
-    );
-    await runTransactionDone(transaction).catch(() => undefined);
-    rows.forEach((row) => {
-      const rec = row as ThemeAssetRecord | undefined;
-      if (rec?.id && rec.dataUrl) {
-        map[rec.id] = rec.dataUrl;
-      }
-    });
-  } finally {
-    database.close();
-  }
+  const transaction = database.transaction(THEME_ASSET_STORE, "readonly");
+  const store = transaction.objectStore(THEME_ASSET_STORE);
+  const rows = await Promise.all(
+    uncachedIds.map((id) => runRequest(store.get(id)).catch(() => undefined))
+  );
+  await runTransactionDone(transaction).catch(() => undefined);
+  rows.forEach((row) => {
+    const rec = row as ThemeAssetRecord | undefined;
+    if (rec?.id && rec.dataUrl) {
+      cacheAssetDataUrl(rec.id, rec.dataUrl);
+      map[rec.id] = rec.dataUrl;
+    }
+  });
   return map;
 }
 
@@ -301,17 +330,14 @@ export async function deleteThemeAsset(id: string): Promise<void> {
   if (themePresetUsesAsset(id)) {
     return;
   }
+  _assetDataUrlCache.delete(id);
   const database = await openThemeDb();
   if (!database) {
     return;
   }
-  try {
-    const transaction = database.transaction(THEME_ASSET_STORE, "readwrite");
-    transaction.objectStore(THEME_ASSET_STORE).delete(id);
-    await runTransactionDone(transaction);
-  } finally {
-    database.close();
-  }
+  const transaction = database.transaction(THEME_ASSET_STORE, "readwrite");
+  transaction.objectStore(THEME_ASSET_STORE).delete(id);
+  await runTransactionDone(transaction);
 }
 
 export async function saveThemeAssetFromBlob(

@@ -1677,7 +1677,7 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
         return () => { cancelled = true; };
     }, [label, characterId, d?.stickerUrl]);
 
-    const imgUrl = d?.stickerUrl || resolvedUrl;
+    const imgUrl = d?.stickerUrl || cachedUrl || resolvedUrl;
     if (imgUrl) {
         return (
             <div className="chat-sticker chat-sticker-image sticker-bounce p-1">

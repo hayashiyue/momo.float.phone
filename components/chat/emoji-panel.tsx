@@ -148,24 +148,28 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
             setPackUrlMap({});
             return;
         }
-        let cancelled = false;
         const packs = loadStickerPacksForCharacters(ids).filter(pack => pack.stickers.length > 0);
         setStickerPacks(packs);
         setActivePackId(prev => (prev && packs.some(pack => pack.id === prev) ? prev : packs[0]?.id ?? null));
-        Promise.all(packs.map(async pack => [pack.id, await resolvePackStickerMap(pack)] as const)).then(entries => {
-            if (cancelled) return;
-            const next: Record<string, string> = {};
-            for (const [packId, map] of entries) {
-                for (const [name, url] of Object.entries(map)) {
-                    next[`${packId}:${name}`] = url;
-                }
-            }
-            setPackUrlMap(next);
-        });
-        return () => { cancelled = true; };
     }, [characterId, characterIds]);
 
     const activePack = stickerPacks.find(pack => pack.id === activePackId) ?? stickerPacks[0] ?? null;
+
+    useEffect(() => {
+        if (!activePack) return;
+        let cancelled = false;
+        resolvePackStickerMap(activePack).then(map => {
+            if (cancelled) return;
+            setPackUrlMap(prev => {
+                const next = { ...prev };
+                for (const [name, url] of Object.entries(map)) {
+                    next[`${activePack.id}:${name}`] = url;
+                }
+                return next;
+            });
+        });
+        return () => { cancelled = true; };
+    }, [activePack]);
 
     return (
         <div className="h-[220px] flex flex-col">
