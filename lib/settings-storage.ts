@@ -194,24 +194,19 @@ export function loadPresets(): PresetConfig[] {
             return _presetsMemoResult;
         }
         const presets: PresetConfig[] = cachedPresets.map(stripDeprecatedPresetFields);
-        let shouldPersistCleanup = JSON.stringify(cachedPresets) !== JSON.stringify(presets);
 
         // Ensure built-in preset exists and is up-to-date
         const existingBuiltin = presets.find(p => p.builtIn);
         if (!existingBuiltin) {
             const builtin = createBuiltinPreset();
             presets.unshift(builtin);
-            savePresets(presets);
-            shouldPersistCleanup = false;
+            writePresetsCache(presets.map(stripDeprecatedPresetFields));
         } else if ((existingBuiltin.builtInVersion ?? 0) < BUILTIN_PRESET_VERSION) {
             const fresh = preserveCustomAppPresetPrompts(createBuiltinPreset(), existingBuiltin);
             fresh.id = existingBuiltin.id;
             const idx = presets.indexOf(existingBuiltin);
             presets[idx] = fresh;
-            savePresets(presets);
-            shouldPersistCleanup = false;
-        } else if (shouldPersistCleanup) {
-            savePresets(presets);
+            writePresetsCache(presets.map(stripDeprecatedPresetFields));
         }
 
         _presetsMemoRef = readPresetsCache();

@@ -24,14 +24,12 @@ export type DebugInfo = {
 // 底层调用日志环容量。原为 50：聊天请求与 18 处 simpleLLMCall 后台调用（记忆总结、
 // NPC 生成、剧情、地图等）共享一个环，用户想看自己刚才那次聊天时很容易已被后台调用
 // 挤掉，因此扩容；配合单条截断与体积预算控制总占用。
-const MAX_API_LOGS = 150;
+const MAX_API_LOGS = 40;
 // 工坊环容量：只有答疑引擎写入，量小，维持原值。
-const MAX_QA_API_LOGS = 50;
-// 单环序列化字符预算：超预算时从最旧开始丢弃，控制 IndexedDB 常驻体积与序列化开销。
-// 原为 2MB：特调对局一次调用带整段历史，单条日志逼近 100K，二十来轮就把预算塞满，
-// 把普通聊天、记忆总结这些小记录全挤出去，来源过滤里只剩一个角色。提到 8MB 能装
-// 八十来条这样的大记录；存在 IndexedDB 里，这个量级没有压力。
-const MAX_API_LOGS_SERIALIZED_CHARS = 8 * 1024 * 1024;
+const MAX_QA_API_LOGS = 30;
+// 单环序列化字符预算：iOS WebKit 下每次 pushApiLog 都会同步 JSON.parse + JSON.stringify 整份日志，
+// 8MB 会在生成结束瞬间产生 50MB+ 内存峰值并卡死主线程；控制在 512KB 内可消除阻塞与 OOM。
+const MAX_API_LOGS_SERIALIZED_CHARS = 512 * 1024;
 const MAX_QA_LOGS_SERIALIZED_CHARS = 1024 * 1024;
 // 单条文本截断上限：记忆总结类调用的完整 prompt 动辄几十 KB，写日志前先截断，
 // 控制每次 push 的 parse/stringify 写放大与常驻体积。

@@ -801,15 +801,7 @@ function appendToSessionBucket(msg: ChatMessage): void {
         if (bucket) bucket.push(msg);
         else _sessionBuckets.set(msg.sessionId, [msg]);
         _indexedMessagesLength = _messagesCache.length;
-        const sorted = _sessionSortedMemo.get(msg.sessionId);
-        if (sorted) {
-            const prev = sorted[sorted.length - 1];
-            if (!prev || compareChatMessages(prev, msg) <= 0) {
-                sorted.push(msg);
-            } else {
-                _sessionSortedMemo.delete(msg.sessionId);
-            }
-        }
+        _sessionSortedMemo.delete(msg.sessionId);
         if (isSessionPreviewCandidate(msg)) {
             const prevLast = _sessionLastVisibleMemo.get(msg.sessionId);
             if (prevLast === undefined) {
@@ -840,10 +832,10 @@ function getSortedSessionMessages(sessionId: string): ChatMessage[] {
     const bucket = getSessionBucket(sessionId);
     if (bucket.length === 0) return [];
     const memo = _sessionSortedMemo.get(sessionId);
-    if (memo) return memo;
+    if (memo) return [...memo];
     const sorted = [...bucket].sort(compareChatMessages);
     _sessionSortedMemo.set(sessionId, sorted);
-    return sorted;
+    return [...sorted];
 }
 
 function getNextMessageOrder(sessionId: string): number {
