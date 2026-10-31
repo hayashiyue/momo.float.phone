@@ -105,17 +105,29 @@ function normalizeTurn(value: unknown): ChatOfflineTurn | null {
     };
 }
 
+const _offlineTurnsMemo = new Map<string, { raw: string | null; turns: ChatOfflineTurn[] }>();
+
 export function loadChatOfflineTurns(sessionId: string): ChatOfflineTurn[] {
+    const key = storageKey(sessionId);
+    const raw = kvGet(key);
+    const cached = _offlineTurnsMemo.get(sessionId);
+    if (cached && cached.raw === raw) {
+        return cached.turns;
+    }
     try {
-        const raw = kvGet(storageKey(sessionId));
         const parsed = raw ? JSON.parse(raw) as unknown : [];
-        if (!Array.isArray(parsed)) return [];
-        return parsed
-            .map(normalizeTurn)
-            .filter((turn): turn is ChatOfflineTurn => Boolean(turn))
-            .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        const turns = Array.isArray(parsed)
+            ? parsed
+                .map(normalizeTurn)
+                .filter((turn): turn is ChatOfflineTurn => Boolean(turn))
+                .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+            : [];
+        _offlineTurnsMemo.set(sessionId, { raw, turns });
+        return turns;
     } catch {
-        return [];
+        const empty: ChatOfflineTurn[] = [];
+        _offlineTurnsMemo.set(sessionId, { raw, turns: empty });
+        return empty;
     }
 }
 

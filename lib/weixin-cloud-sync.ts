@@ -1741,6 +1741,7 @@ export async function deleteWeixinCloudMessagesFromCloud(messages: ChatMessage[]
 }
 
 function shouldUploadLocalWeixinMessage(message: ChatMessage): boolean {
+  if (loadWeixinCloudSyncConfig().enabled !== true) return false;
   if (message.cloudSync?.source === "weixin-cloud") return false;
   if (message.status === "failed" || message.status === "sending") return false;
   if (message.role !== "user" && message.role !== "assistant") return false;

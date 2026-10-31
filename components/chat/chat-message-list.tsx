@@ -162,14 +162,21 @@ export function ChatMessageList({ onCloseApp, activeSession, onSelectSession, on
         return () => { cancelled = true; };
     }, [mascotSettings.avatarImage]);
 
+    const activeSessionRef = React.useRef(activeSession);
+    activeSessionRef.current = activeSession;
+
     useEffect(() => {
         if (!activeSession) {
-            setSessions(loadChatSessions());
+            setSessions([...loadChatSessions()]);
         }
     }, [activeSession]);
 
     useEffect(() => {
-        const refreshSessions = () => setSessions([...loadChatSessions()]);
+        const refreshSessions = () => {
+            // 聊天室打开时列表被完全遮挡，不在后台随每条消息重算整张列表，退回列表时由上方 activeSession effect 统一刷新
+            if (activeSessionRef.current) return;
+            setSessions([...loadChatSessions()]);
+        };
         window.addEventListener("weixin-messages-updated", refreshSessions);
         window.addEventListener("chat-messages-updated", refreshSessions);
         window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, refreshSessions);

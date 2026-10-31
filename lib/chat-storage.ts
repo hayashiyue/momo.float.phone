@@ -759,10 +759,91 @@ export function compareChatMessages(a: ChatMessage, b: ChatMessage): number {
     return a.id.localeCompare(b.id);
 }
 
+let _indexedMessagesRef: ChatMessage[] | null = null;
+let _indexedMessagesLength = -1;
+const _sessionBuckets = new Map<string, ChatMessage[]>();
+const _sessionSortedMemo = new Map<string, ChatMessage[]>();
+const _sessionLastVisibleMemo = new Map<string, ChatMessage | null>();
+
+function invalidateSessionMemo(sessionId?: string): void {
+    if (!sessionId) {
+        _indexedMessagesRef = null;
+        _indexedMessagesLength = -1;
+        _sessionBuckets.clear();
+        _sessionSortedMemo.clear();
+        _sessionLastVisibleMemo.clear();
+        return;
+    }
+    _sessionSortedMemo.delete(sessionId);
+    _sessionLastVisibleMemo.delete(sessionId);
+}
+
+function getSessionBucket(sessionId: string): ChatMessage[] {
+    if (_indexedMessagesRef !== _messagesCache || _indexedMessagesLength !== _messagesCache.length) {
+        _sessionBuckets.clear();
+        _sessionSortedMemo.clear();
+        _sessionLastVisibleMemo.clear();
+        for (let i = 0; i < _messagesCache.length; i += 1) {
+            const msg = _messagesCache[i];
+            const bucket = _sessionBuckets.get(msg.sessionId);
+            if (bucket) bucket.push(msg);
+            else _sessionBuckets.set(msg.sessionId, [msg]);
+        }
+        _indexedMessagesRef = _messagesCache;
+        _indexedMessagesLength = _messagesCache.length;
+    }
+    return _sessionBuckets.get(sessionId) ?? [];
+}
+
+function appendToSessionBucket(msg: ChatMessage): void {
+    if (_indexedMessagesRef === _messagesCache && _indexedMessagesLength === _messagesCache.length - 1) {
+        const bucket = _sessionBuckets.get(msg.sessionId);
+        if (bucket) bucket.push(msg);
+        else _sessionBuckets.set(msg.sessionId, [msg]);
+        _indexedMessagesLength = _messagesCache.length;
+        const sorted = _sessionSortedMemo.get(msg.sessionId);
+        if (sorted) {
+            const prev = sorted[sorted.length - 1];
+            if (!prev || compareChatMessages(prev, msg) <= 0) {
+                sorted.push(msg);
+            } else {
+                _sessionSortedMemo.delete(msg.sessionId);
+            }
+        }
+        if (isSessionPreviewCandidate(msg)) {
+            const prevLast = _sessionLastVisibleMemo.get(msg.sessionId);
+            if (prevLast === undefined) {
+                // will be computed on demand
+            } else if (!prevLast || compareChatMessages(prevLast, msg) <= 0) {
+                _sessionLastVisibleMemo.set(msg.sessionId, msg);
+            } else {
+                _sessionLastVisibleMemo.delete(msg.sessionId);
+            }
+        }
+    } else {
+        invalidateSessionMemo(msg.sessionId);
+    }
+}
+
+function replaceInSessionBucket(updated: ChatMessage): void {
+    if (_indexedMessagesRef === _messagesCache) {
+        const bucket = _sessionBuckets.get(updated.sessionId);
+        if (bucket) {
+            const idx = bucket.findIndex(m => m.id === updated.id);
+            if (idx !== -1) bucket[idx] = updated;
+        }
+    }
+    invalidateSessionMemo(updated.sessionId);
+}
+
 function getSortedSessionMessages(sessionId: string): ChatMessage[] {
-    return _loadAllMessages()
-        .filter(m => m.sessionId === sessionId)
-        .sort(compareChatMessages);
+    const bucket = getSessionBucket(sessionId);
+    if (bucket.length === 0) return [];
+    const memo = _sessionSortedMemo.get(sessionId);
+    if (memo) return memo;
+    const sorted = [...bucket].sort(compareChatMessages);
+    _sessionSortedMemo.set(sessionId, sorted);
+    return sorted;
 }
 
 function getNextMessageOrder(sessionId: string): number {
@@ -839,13 +920,18 @@ export function reindexSessionMessageOrdersByTime(sessionId: string): void {
 }
 
 export function getLastVisibleSessionMessage(sessionId: string): ChatMessage | null {
-    // 热路径只需要“最后一条”，不应先 filter + sort 分配整份会话消息。
-    // 单次线性扫描也能兼容旧数据缺失 order、同时间戳等排序规则。
+    const bucket = getSessionBucket(sessionId);
+    if (bucket.length === 0) return null;
+    if (_sessionLastVisibleMemo.has(sessionId)) {
+        return _sessionLastVisibleMemo.get(sessionId) ?? null;
+    }
     let last: ChatMessage | null = null;
-    for (const msg of _messagesCache) {
-        if (msg.sessionId !== sessionId || !isSessionPreviewCandidate(msg)) continue;
+    for (let i = 0; i < bucket.length; i += 1) {
+        const msg = bucket[i];
+        if (!isSessionPreviewCandidate(msg)) continue;
         if (!last || compareChatMessages(last, msg) < 0) last = msg;
     }
+    _sessionLastVisibleMemo.set(sessionId, last);
     return last;
 }
 
@@ -1300,9 +1386,14 @@ function _loadAllMessages(): ChatMessage[] {
 }
 
 // ── CRUD for Contacts ─────────────────────────
+let _contactsRestoredOnce = false;
 export function loadChatContacts(): ChatContact[] {
+    if (_hydrated && _contactsRestoredOnce) {
+        return _contactsCache;
+    }
     let normalized = normalizeChatContacts(_contactsCache);
     normalized = restoreContactsForPrivateSessions(normalized.items, _sessionsCache);
+    if (_hydrated) _contactsRestoredOnce = true;
     if (normalized.changed) {
         _contactsCache = normalized.items;
         if (_hydrated && typeof window !== "undefined") dbReplaceContacts(normalized.items);
@@ -1492,6 +1583,7 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     }
 
     _messagesCache.push(newMsg);
+    appendToSessionBucket(newMsg);
     rememberMessageOrder(newMsg);
     dbPutMessage(newMsg);
     resolvePendingAvatarRecommendation(newMsg);
@@ -1553,6 +1645,7 @@ export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMess
     };
 
     _messagesCache.push(newMsg);
+    appendToSessionBucket(newMsg);
     rememberMessageOrder(newMsg);
     dbPutMessage(newMsg);
 
@@ -1952,6 +2045,7 @@ export function editChatMessage(messageId: string, newContent: string) {
     const msgIdx = _messagesCache.findIndex(m => m.id === messageId);
     if (msgIdx !== -1) {
         _messagesCache[msgIdx] = { ..._messagesCache[msgIdx], content: newContent };
+        replaceInSessionBucket(_messagesCache[msgIdx]);
         dbPutMessage(_messagesCache[msgIdx]);
 
         const sessionId = _messagesCache[msgIdx].sessionId;
@@ -1970,6 +2064,7 @@ export function retractChatMessage(messageId: string) {
     const msgIdx = _messagesCache.findIndex(m => m.id === messageId);
     if (msgIdx !== -1) {
         _messagesCache[msgIdx] = { ..._messagesCache[msgIdx], isRetracted: true };
+        replaceInSessionBucket(_messagesCache[msgIdx]);
         dbPutMessage(_messagesCache[msgIdx]);
 
         const sessionId = _messagesCache[msgIdx].sessionId;
@@ -2162,6 +2257,7 @@ export function updateMessageMediaStatus(messageId: string, newStatus: "pending"
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaData: { ..._messagesCache[idx].mediaData, status: newStatus } };
+        replaceInSessionBucket(_messagesCache[idx]);
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2171,6 +2267,7 @@ export function updateMessageMediaData(messageId: string, data: ChatMessage["med
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaData: data };
+        replaceInSessionBucket(_messagesCache[idx]);
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2179,6 +2276,7 @@ export function updateMessageMediaUrl(messageId: string, mediaUrl: string) {
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaUrl };
+        replaceInSessionBucket(_messagesCache[idx]);
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2227,6 +2325,7 @@ export function updateChatMessage(
 
     _messagesCache[idx] = { ..._messagesCache[idx], ...patch };
     const updated = _messagesCache[idx];
+    replaceInSessionBucket(updated);
     dbPutMessage(updated);
 
     const sessions = loadChatSessions();
@@ -2338,6 +2437,7 @@ export function replaceMessageWithParts(
 
     // Remove original
     _messagesCache.splice(idx, 1);
+    invalidateSessionMemo();
     dbDeleteMessage(originalId);
 
     // Insert parsed parts at the same position, preserving timestamp
@@ -2462,6 +2562,7 @@ export function replaceResponseBatchWithParts(
     const newMessages = toolCallMessage ? [...visibleMessages, toolCallMessage] : visibleMessages;
 
     _messagesCache.splice(insertIdx, 0, ...newMessages);
+    invalidateSessionMemo();
     dbPutMessages(newMessages);
     reindexSessionMessageOrders(sessionId);
 
@@ -2561,6 +2662,7 @@ export function replaceGroupResponseRound(
     }));
 
     _messagesCache.splice(insertIdx, 0, ...newMessages);
+    invalidateSessionMemo();
     dbPutMessages(newMessages);
     reindexSessionMessageOrders(sessionId);
 
@@ -2622,17 +2724,29 @@ export function getLatestCharacterStateValues(
     options?: { before?: Pick<ChatMessage, "createdAt" | "id"> },
 ): StateValue[] {
     if (!characterId) return [];
-    const sessionsById = new Map(loadChatSessions().map(session => [session.id, session]));
-    const candidates = _loadAllMessages()
-        .filter(msg => {
-            if (!isBeforeStateCutoff(msg, options?.before)) return false;
-            return getStateOwnerCharacterId(msg, sessionsById) === characterId;
-        })
-        .sort((a, b) => {
-            const timeDiff = getMessageTimeValue(b) - getMessageTimeValue(a);
-            if (timeDiff !== 0) return timeDiff;
-            return b.id.localeCompare(a.id);
-        });
-
-    return candidates[0]?.stateValues || [];
+    const sessions = loadChatSessions();
+    const relevantSessions = sessions.filter(s =>
+        (!s.isGroup && s.contactId === characterId)
+        || (s.isGroup && s.participantIds?.includes(characterId))
+    );
+    let latestMsg: ChatMessage | null = null;
+    for (const sess of relevantSessions) {
+        const bucket = getSessionBucket(sess.id);
+        for (let i = bucket.length - 1; i >= 0; i -= 1) {
+            const msg = bucket[i];
+            if (!msg.stateValues || msg.stateValues.length === 0) continue;
+            const ownerId = msg.senderCharacterId || (!sess.isGroup ? sess.contactId : null);
+            if (ownerId !== characterId) continue;
+            if (!isBeforeStateCutoff(msg, options?.before)) continue;
+            if (!latestMsg) {
+                latestMsg = msg;
+            } else {
+                const timeDiff = getMessageTimeValue(msg) - getMessageTimeValue(latestMsg);
+                if (timeDiff > 0 || (timeDiff === 0 && msg.id.localeCompare(latestMsg.id) > 0)) {
+                    latestMsg = msg;
+                }
+            }
+        }
+    }
+    return latestMsg?.stateValues || [];
 }
