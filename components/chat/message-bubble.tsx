@@ -1627,9 +1627,13 @@ function setStickerCacheUrl(key: string, url: string): void {
     _stickerUrlCache.set(key, url);
 }
 
-/** 按需懒加载表情包，不再在进入聊天室时把角色名下全部未使用的 GIF 图集一次性塞进内存 */
-export async function prewarmStickerCache(_characterId: string): Promise<void> {
-    return Promise.resolve();
+/** Pre-populate sticker cache for a character. Call before rendering messages. */
+export async function prewarmStickerCache(characterId: string): Promise<void> {
+    const { resolveCustomStickerMap } = await import("@/lib/custom-sticker-storage");
+    const map = await resolveCustomStickerMap(characterId);
+    for (const [name, url] of Object.entries(map)) {
+        setStickerCacheUrl(`${characterId}:${name}`, url);
+    }
 }
 
 function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: string }) {

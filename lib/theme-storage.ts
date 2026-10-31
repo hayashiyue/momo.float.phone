@@ -366,15 +366,16 @@ export function writeThemeProfile(profile: ThemeProfile): ThemeProfile {
 }
 
 export function collectThemeAssetIds(profile: ThemeProfile): string[] {
-  const activeScheme = profile.activeIconSchemeId
-    ? profile.iconSchemes.find((s) => s.id === profile.activeIconSchemeId)
-    : null;
-  const iconIds = Object.values(activeScheme ? activeScheme.iconSkins : profile.iconSkins)
-    .filter((value): value is string => Boolean(value));
-  return Array.from(new Set([
+  const iconIds = Object.values(profile.iconSkins).filter((value): value is string => Boolean(value));
+  const iconSchemeIds = profile.iconSchemes.flatMap((scheme) =>
+    Object.values(scheme.iconSkins).filter((value): value is string => Boolean(value))
+  );
+  return [
     profile.wallpaperAssetId ?? "",
     profile.fontAssetId ?? "",
     profile.dockSkinAssetId ?? "",
+    ...profile.wallpaperLibrary,
     ...iconIds,
-  ].filter(Boolean)));
+    ...iconSchemeIds,
+  ].filter(Boolean);
 }

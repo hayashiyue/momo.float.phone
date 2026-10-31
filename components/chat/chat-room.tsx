@@ -4388,7 +4388,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
 
     const handleOfflinePointerDown = (e: React.PointerEvent, target: OfflineActionTarget) => {
         if (e.pointerType === "mouse" && e.button !== 0) return;
-        if (e.pointerType === "mouse") e.preventDefault();
+        e.preventDefault();
         const anchor = { x: e.clientX, y: e.clientY };
         startPosRef.current = anchor;
         longPressTriggeredRef.current = false;
@@ -5126,9 +5126,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         // Prevent right click from triggering the timer, as it has its own context menu handler
         if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-        if (e.pointerType === 'mouse') {
-            e.preventDefault();
-        }
+        // Prevent text selection on long press
+        e.preventDefault();
 
         try { window.getSelection()?.removeAllRanges(); } catch {}
         const anchor = { x: e.clientX, y: e.clientY };

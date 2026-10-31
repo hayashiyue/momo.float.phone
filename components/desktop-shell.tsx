@@ -4600,13 +4600,11 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
 
 
-                {/* 改动 ①：桌面图标层与分页圆点常驻挂载，App 打开时由 .phone-desktop-layer display:none 隐藏，
-                    消除退出 App 时重挂 30+ 层 backdrop-filter 毛玻璃与图标皮肤图的 0.5~0.6s 阻塞 */}
+                {!activeApp ? (
+                  <>
                 <div
                   ref={swipeLayerRef}
-                  className="phone-swipe-layer phone-desktop-layer"
-                  inert={Boolean(activeApp)}
-                  aria-hidden={Boolean(activeApp) || undefined}
+                  className="phone-swipe-layer"
                   style={{ "--swipe-page": boundedCurrentPageIndex } as CSSProperties}
                 >
                       {pageKeys.map((pageKey, pageIndex) => {
@@ -4797,11 +4795,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                       })}
                     </div>
 
-                <div
-                  className="page-controls phone-desktop-layer"
-                  inert={Boolean(activeApp)}
-                  aria-hidden={Boolean(activeApp) || undefined}
-                >
+                <div className="page-controls">
                   {pageKeys.map((pageKey, pageIndex) => (
                     <button
                       key={pageKey}
@@ -4812,7 +4806,8 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     />
                   ))}
                 </div>
-                {activeApp ? (
+                  </>
+                ) : (
                   <>
                     <section className="phone-app-pane" style={activeApp === "dwelling" || activeApp === "xiaohongshu" || activeApp === "shopping" ? { display: "none" } : undefined}>
                       {renderAppBody()}
@@ -4862,11 +4857,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                 )}
               </div>
 
+              {!activeApp && (
               <footer
                 ref={dockElRef}
-                className={`${editMode ? "dock edit-mode" : "dock"} phone-desktop-layer`}
-                inert={Boolean(activeApp)}
-                aria-hidden={Boolean(activeApp) || undefined}
+                className={editMode ? "dock edit-mode" : "dock"}
                 {...(dockSkinUrl ? { "data-skinned": "" } : {})}
                 style={{ "--dock-count": Math.max(1, dock.length) } as CSSProperties}
                 onPointerMove={handleSwipeMove}
@@ -4932,6 +4926,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                     );
                   })}
               </footer>
+              )}
               <div ref={returnMaskRef} className="phone-return-mask" aria-hidden="true">
                 <div className="phone-return-pill">正在返回…</div>
               </div>
