@@ -1826,8 +1826,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
     }, [session.chatAccountId, session.contactId]);
 
     const availableShoppingGifts = useMemo(
-        () => loadDeliveredShoppingGifts(),
-        [messages],
+        () => (richModal === "gift" ? loadDeliveredShoppingGifts() : []),
+        [richModal],
     );
 
     useEffect(() => {
@@ -5130,6 +5130,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
             e.preventDefault();
         }
 
+        try { window.getSelection()?.removeAllRanges(); } catch {}
         const anchor = { x: e.clientX, y: e.clientY };
         startPosRef.current = anchor;
         longPressTriggeredRef.current = false;
@@ -5138,6 +5139,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         longPressTimerRef.current = setTimeout(() => {
             longPressTimerRef.current = null;
             if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) return;
+            try { window.getSelection()?.removeAllRanges(); } catch {}
             longPressTriggeredRef.current = true;
             openMessageContextMenu(msgId, anchor);
         }, 320); // 320ms long press
@@ -5873,6 +5875,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
             <div
                 ref={scrollRef}
                 className="page-body chat-room-main-pane flex flex-col gap-4 chat-scroll-anchored"
+                onSelectStart={(e) => e.preventDefault()}
+                onContextMenu={(e) => e.preventDefault()}
                 onScroll={(e) => {
                     if (Date.now() - contextMenuOpenedAtRef.current < 300) return;
                     if (activeMessageId || activeOfflineTarget) closeContextMenu();

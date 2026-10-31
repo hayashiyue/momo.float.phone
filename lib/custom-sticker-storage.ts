@@ -42,30 +42,49 @@ type AssignmentMap = Record<string, string[]>;
 
 // ── localStorage helpers ──
 
+let _packsMemoRaw: string | null | undefined = undefined;
+let _packsMemoResult: StickerPack[] = [];
+let _assignMemoRaw: string | null | undefined = undefined;
+let _assignMemoResult: AssignmentMap = {};
+
 function readPacks(): StickerPack[] {
     if (typeof window === "undefined") return [];
     try {
         const raw = kvGet(PACKS_KEY);
-        return raw ? JSON.parse(raw) : [];
+        if (raw === _packsMemoRaw) return _packsMemoResult;
+        const parsed = raw ? JSON.parse(raw) : [];
+        _packsMemoRaw = raw;
+        _packsMemoResult = Array.isArray(parsed) ? parsed : [];
+        return _packsMemoResult;
     } catch { return []; }
 }
 
 function writePacks(packs: StickerPack[]): void {
     if (typeof window === "undefined") return;
-    kvSet(PACKS_KEY, JSON.stringify(packs));
+    const raw = JSON.stringify(packs);
+    _packsMemoRaw = raw;
+    _packsMemoResult = packs;
+    kvSet(PACKS_KEY, raw);
 }
 
 function readAssignments(): AssignmentMap {
     if (typeof window === "undefined") return {};
     try {
         const raw = kvGet(ASSIGN_KEY);
-        return raw ? JSON.parse(raw) : {};
+        if (raw === _assignMemoRaw) return _assignMemoResult;
+        const parsed = raw ? JSON.parse(raw) : {};
+        _assignMemoRaw = raw;
+        _assignMemoResult = parsed && typeof parsed === "object" ? parsed : {};
+        return _assignMemoResult;
     } catch { return {}; }
 }
 
 function writeAssignments(map: AssignmentMap): void {
     if (typeof window === "undefined") return;
-    kvSet(ASSIGN_KEY, JSON.stringify(map));
+    const raw = JSON.stringify(map);
+    _assignMemoRaw = raw;
+    _assignMemoResult = map;
+    kvSet(ASSIGN_KEY, raw);
 }
 
 // ── Pack CRUD ──

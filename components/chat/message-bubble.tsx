@@ -1614,16 +1614,22 @@ function PokeBubble({ msg, charName, userName }: { msg: ChatMessage; charName?: 
 
 // ── Sticker ─────────────────────────────
 
-// In-memory cache: assetId/name → resolved URL (survives re-renders, cleared on page reload)
+// In-memory cache: assetId/name → resolved URL (bounded LRU to prevent GIF OOM on iOS)
 const _stickerUrlCache = new Map<string, string>();
+const MAX_STICKER_CACHE_ENTRIES = 50;
 
-/** Pre-populate sticker cache for a character. Call before rendering messages. */
-export async function prewarmStickerCache(characterId: string): Promise<void> {
-    const { resolveCustomStickerMap } = await import("@/lib/custom-sticker-storage");
-    const map = await resolveCustomStickerMap(characterId);
-    for (const [name, url] of Object.entries(map)) {
-        _stickerUrlCache.set(`${characterId}:${name}`, url);
+function setStickerCacheUrl(key: string, url: string): void {
+    if (_stickerUrlCache.has(key)) _stickerUrlCache.delete(key);
+    else if (_stickerUrlCache.size >= MAX_STICKER_CACHE_ENTRIES) {
+        const oldest = _stickerUrlCache.keys().next().value;
+        if (oldest !== undefined) _stickerUrlCache.delete(oldest);
     }
+    _stickerUrlCache.set(key, url);
+}
+
+/** 按需懒加载表情包，不再在进入聊天室时把角色名下全部未使用的 GIF 图集一次性塞进内存 */
+export async function prewarmStickerCache(_characterId: string): Promise<void> {
+    return Promise.resolve();
 }
 
 function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: string }) {
@@ -1640,7 +1646,7 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
         const custom = findCustomStickerByName(characterId, label);
         if (!custom) return;
         if (custom.externalUrl) {
-            _stickerUrlCache.set(cacheKey, custom.externalUrl);
+            setStickerCacheUrl(cacheKey, custom.externalUrl);
             setResolvedUrl(custom.externalUrl);
             return;
         }
@@ -1652,7 +1658,7 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
         let cancelled = false;
         resolveCustomStickerUrl(custom.assetId).then(url => {
             if (!cancelled && url) {
-                _stickerUrlCache.set(cacheKey, url);
+                setStickerCacheUrl(cacheKey, url);
                 setResolvedUrl(url);
             }
         });

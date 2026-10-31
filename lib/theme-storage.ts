@@ -252,13 +252,25 @@ export async function getThemeAssetMap(ids: string[]): Promise<Record<string, st
   uniqueIds.forEach((id) => {
     if (/^(?:https?:|data:|blob:)/i.test(id)) map[id] = id;
   });
-  const rows = await Promise.all(storedIds.map((id) => readAssetRecord(id)));
-  rows.forEach((row) => {
-    if (!row) {
-      return;
-    }
-    map[row.id] = row.dataUrl;
-  });
+  if (storedIds.length === 0) return map;
+  const database = await openThemeDb();
+  if (!database) return map;
+  try {
+    const transaction = database.transaction(THEME_ASSET_STORE, "readonly");
+    const store = transaction.objectStore(THEME_ASSET_STORE);
+    const rows = await Promise.all(
+      storedIds.map((id) => runRequest(store.get(id)).catch(() => undefined))
+    );
+    await runTransactionDone(transaction).catch(() => undefined);
+    rows.forEach((row) => {
+      const rec = row as ThemeAssetRecord | undefined;
+      if (rec?.id && rec.dataUrl) {
+        map[rec.id] = rec.dataUrl;
+      }
+    });
+  } finally {
+    database.close();
+  }
   return map;
 }
 
@@ -354,16 +366,15 @@ export function writeThemeProfile(profile: ThemeProfile): ThemeProfile {
 }
 
 export function collectThemeAssetIds(profile: ThemeProfile): string[] {
-  const iconIds = Object.values(profile.iconSkins).filter((value): value is string => Boolean(value));
-  const iconSchemeIds = profile.iconSchemes.flatMap((scheme) =>
-    Object.values(scheme.iconSkins).filter((value): value is string => Boolean(value))
-  );
-  return [
+  const activeScheme = profile.activeIconSchemeId
+    ? profile.iconSchemes.find((s) => s.id === profile.activeIconSchemeId)
+    : null;
+  const iconIds = Object.values(activeScheme ? activeScheme.iconSkins : profile.iconSkins)
+    .filter((value): value is string => Boolean(value));
+  return Array.from(new Set([
     profile.wallpaperAssetId ?? "",
     profile.fontAssetId ?? "",
     profile.dockSkinAssetId ?? "",
-    ...profile.wallpaperLibrary,
     ...iconIds,
-    ...iconSchemeIds,
-  ].filter(Boolean);
+  ].filter(Boolean)));
 }

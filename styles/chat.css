@@ -1022,6 +1022,7 @@
   color: var(--c-text-title);
 }
 
+.chat-room-wrapper .page-body,
 .chat-bubble-role-user,
 .chat-bubble-role-assistant,
 .chat-bubble-role-user *,
@@ -1029,9 +1030,9 @@
 .chat-sys-msg,
 .chat-offline-text,
 .chat-offline-text * {
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
+  -webkit-touch-callout: none !important;
+  -webkit-user-select: none !important;
+  user-select: none !important;
 }
 
 /* ── Context menu ── */
