@@ -1508,7 +1508,6 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         if (!el || !anchor) return;
         const margin = 8;
         const gap = 12;
-        const anchor = contextMenuAnchor;
         const menuW = el.offsetWidth;
         const menuH = el.offsetHeight;
         const viewportW = window.innerWidth;
@@ -3419,6 +3418,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         setGenerationLock(session.id);
 
         try {
+            await new Promise<void>(resolve => window.requestAnimationFrame(() => window.setTimeout(resolve, 0)));
+            throwIfGenerationStopped(generationGuard);
             const trimmedRetryInstruction = retryInstruction?.trim();
             let generationHistory: ChatMessage[] = trimmedRetryInstruction
                 ? [...history, {
@@ -3791,6 +3792,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         streamAccumRef.current = "";
         setStreamPreview(null);
         try {
+            await new Promise<void>(resolve => window.requestAnimationFrame(() => window.setTimeout(resolve, 0)));
+            throwIfGenerationStopped(generationGuard);
             let latestMessages = loadChatMessages(session.id);
             const latestSession = loadChatSessions().find((item) => item.id === session.id);
             if (!session.isGroup && latestSession?.allowForcedOfflineStory === true) {
@@ -5123,8 +5126,9 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         // Prevent right click from triggering the timer, as it has its own context menu handler
         if (e.pointerType === 'mouse' && e.button !== 0) return;
 
-        // 阻止 iOS 触发原生文本长按菜单/放大镜导致 pointercancel 打断长按计时
-        e.preventDefault();
+        if (e.pointerType === 'mouse') {
+            e.preventDefault();
+        }
 
         const anchor = { x: e.clientX, y: e.clientY };
         startPosRef.current = anchor;

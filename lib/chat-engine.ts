@@ -351,6 +351,7 @@ export type DebugPromptRequestOptions = {
 };
 
 type ChatPromptBuildOptions = {
+    signal?: AbortSignal;
     followUpCount?: number;
     followUpDelay?: number;
     timedWakeElapsedMinutes?: number;
@@ -1928,18 +1929,22 @@ export async function buildChatPromptMessages(
         resolveVisionImagePromptLimit(session),
     );
 
+    throwIfAborted(options?.signal);
     if (config.enableImageRecognition) {
         for (const msg of promptHistory) {
+            throwIfAborted(options?.signal);
             await prepareVisionPromptImageMessage(msg);
         }
     }
 
+    throwIfAborted(options?.signal);
     const [memResults, coreResults, musicLocal, musicCloud] = await Promise.all([
         retrieveMemoriesForPrompt(character.id, wbActivationContext, memConfig).catch(() => null),
         retrieveCoreMemoriesForPrompt(character.id, memConfig).catch(() => null),
         buildMusicLocalMacro(),
         buildMusicCloudMacro(),
     ]);
+    throwIfAborted(options?.signal);
 
     const longTermMemories = memResults ? formatLongTermMemories(memResults) : "";
     const coreMemories = coreResults ? formatCoreMemories(coreResults) : "";

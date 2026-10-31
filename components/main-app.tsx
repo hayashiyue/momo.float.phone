@@ -223,12 +223,9 @@ const FIRST_PAINT_PRELOAD_TIMEOUT_MS = 1500;
 async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme> {
   const profile = readThemeProfile();
   const assetIds = collectFirstPaintThemeAssetIds(profile);
-  let assets: Record<string, string> = {};
+  const assets = assetIds.length ? await getThemeAssetMap(assetIds) : {};
   await Promise.race([
-    (async () => {
-      assets = assetIds.length ? await getThemeAssetMap(assetIds) : {};
-      await Promise.all(Object.values(assets).map(preloadImageDataUrl));
-    })(),
+    Promise.all(Object.values(assets).map(preloadImageDataUrl)),
     wait(FIRST_PAINT_PRELOAD_TIMEOUT_MS),
   ]);
   return { profile, assets };
