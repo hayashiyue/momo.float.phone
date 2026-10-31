@@ -247,7 +247,6 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                             ...(shortcutMarker ? { shortcutMarker } : {}),
                         },
                     );
-                    reindexSessionMessageOrdersByTime(sessionId);
                     if (hasVisible && newCount < 10) scheduleFollowUp(sessionId, newCount, stateValues);
                     clearTimedWakeIfHandled(entry.trigger_key);
                     consumedIds.push(entry.id);

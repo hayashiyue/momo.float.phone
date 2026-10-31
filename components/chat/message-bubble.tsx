@@ -1627,12 +1627,20 @@ function setStickerCacheUrl(key: string, url: string): void {
     _stickerUrlCache.set(key, url);
 }
 
-/** Pre-populate sticker cache for a character. Call before rendering messages. */
-export async function prewarmStickerCache(characterId: string): Promise<void> {
-    const { resolveCustomStickerMap } = await import("@/lib/custom-sticker-storage");
-    const map = await resolveCustomStickerMap(characterId);
-    for (const [name, url] of Object.entries(map)) {
-        setStickerCacheUrl(`${characterId}:${name}`, url);
+/** Pre-populate sticker cache only for stickers actually used in visible messages. */
+export async function prewarmStickerCache(characterId: string, usedNames?: Set<string>): Promise<void> {
+    if (usedNames && usedNames.size === 0) return;
+    const { loadCustomStickers } = await import("@/lib/custom-sticker-storage");
+    const { getThemeAssetMap } = await import("@/lib/theme-storage");
+    const stickers = loadCustomStickers(characterId).filter(s =>
+        (!usedNames || usedNames.has(s.name)) && !_stickerUrlCache.has(`${characterId}:${s.name}`)
+    );
+    if (stickers.length === 0) return;
+    const assetIds = stickers.filter(s => s.assetId && !s.externalUrl).map(s => s.assetId);
+    const assetMap = assetIds.length > 0 ? await getThemeAssetMap(assetIds) : {};
+    for (const s of stickers) {
+        const url = s.externalUrl || assetMap[s.assetId];
+        if (url) setStickerCacheUrl(`${characterId}:${s.name}`, url);
     }
 }
 

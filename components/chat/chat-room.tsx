@@ -1856,7 +1856,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
         const charIds = session.isGroup && session.participantIds
             ? session.participantIds
             : [session.contactId];
-        Promise.all(charIds.map(id => prewarmStickerCache(id))).then(() => {
+        const usedStickerNames = new Set(
+            msgs
+                .filter(m => m.mediaType === "sticker" && m.mediaData?.label)
+                .map(m => m.mediaData!.label!)
+        );
+        Promise.all(charIds.map(id => prewarmStickerCache(id, usedStickerNames))).then(() => {
             setStickerReady(true);
             needsInitialScrollRef.current = true;
             prevMsgCountRef.current = 0;

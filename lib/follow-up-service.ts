@@ -20,7 +20,6 @@ import {
 import type { ChatMessage, StateValue } from "./chat-storage";
 import { generateChatCompletion, flattenCompletionResult } from "./chat-engine";
 import { armFollowUpBailout, armIdleReconnectBailout, cancelBailoutKey, cancelBailoutPrefix, cancelFollowUpBailout, startBailoutHeartbeat } from "./push-bailout-client";
-import { isOutboxConsuming } from "./push-outbox-client";
 import { isWithinPushQuietHours } from "./push-client";
 import {
     IDLE_RECONNECT_MAX_CONSECUTIVE,
@@ -393,7 +392,6 @@ async function saveBackgroundCompletionRounds(
 
 function pollSchedules() {
     try {
-        if (isOutboxConsuming()) return;
         const schedules = loadAllFollowUpSchedules();
         const now = Date.now();
         for (const sched of schedules) {
