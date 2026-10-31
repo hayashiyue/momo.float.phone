@@ -286,9 +286,14 @@ export async function requestBackgroundChatReply(sessionId: string): Promise<{ o
 export function cancelFollowUp(sessionId: string) {
     clearFollowUpSchedule(sessionId);
     cancelFollowUpBailout(sessionId);
-    // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约
+    // 用户发了消息：冷场重连计数清零，延迟 4s 错峰重挂服务端预约，避免与用户紧接着点的「生成」并发抢占内存导致 iOS OOM
     const idleRule = resetIdleReconnectForSession(sessionId);
-    if (idleRule) void armIdleReconnectBailout({ ...idleRule, consecutiveCount: 0 });
+    if (idleRule) {
+        setTimeout(() => {
+            const latestRule = loadIdleReconnectRules().find(r => r.id === idleRule.id);
+            if (latestRule) void armIdleReconnectBailout(latestRule);
+        }, 4000);
+    }
     // If an API call is already in-flight, mark it for cancellation
     if (firingSet.has(sessionId)) {
         cancelledWhileFiring.add(sessionId);

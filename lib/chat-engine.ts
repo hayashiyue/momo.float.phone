@@ -354,6 +354,8 @@ type ChatPromptBuildOptions = {
     signal?: AbortSignal;
     /** 离线定时/追问补发时传入预定触发时刻，使角色看到的系统时间与约定时间一致 */
     referenceTime?: Date;
+    /** 离线推送快照禁用 base64 视觉大图，防止多份请求体叠加导致 iOS OOM 或超出云端 900KB 上限 */
+    disableVision?: boolean;
     followUpCount?: number;
     followUpDelay?: number;
     timedWakeElapsedMinutes?: number;
@@ -543,8 +545,10 @@ export function publishDebugPromptSnapshot(params: {
     options?: DebugPromptRequestOptions;
     requestKind: "completion" | "native-tools" | "native-tools-stream";
     tools?: LlmToolDefinition[];
+    force?: boolean;
 }): DebugPromptSnapshot {
-    const { request, config, preset, meta, options, requestKind, tools } = params;
+    const { request, config, preset, meta, options, requestKind, tools, force } = params;
+    const viewerEnabled = force === true || (typeof window !== "undefined" && loadChatAppSettings().promptViewerEnabled === true);
     const snapshot: DebugPromptSnapshot = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         timestamp: new Date().toISOString(),
@@ -557,10 +561,10 @@ export function publishDebugPromptSnapshot(params: {
         sessionId: options?.debugSessionId,
         characterName: meta?.characterName,
         presetName: preset?.name || "默认预设",
-        messages: debugMessagesFromRequest(request),
-        tools: tools?.map(tool => ({ name: tool.name, description: tool.description })),
+        messages: viewerEnabled ? debugMessagesFromRequest(request) : [],
+        tools: viewerEnabled ? tools?.map(tool => ({ name: tool.name, description: tool.description })) : undefined,
     };
-    if (typeof window !== "undefined") setDebugPromptSnapshot(snapshot);
+    if (typeof window !== "undefined" && viewerEnabled) setDebugPromptSnapshot(snapshot);
     return snapshot;
 }
 
@@ -1933,8 +1937,9 @@ export async function buildChatPromptMessages(
         resolveVisionImagePromptLimit(session),
     );
 
+    const visionActive = config.enableImageRecognition === true && options?.disableVision !== true;
     throwIfAborted(options?.signal);
-    if (config.enableImageRecognition) {
+    if (visionActive) {
         for (const msg of promptHistory) {
             throwIfAborted(options?.signal);
             await prepareVisionPromptImageMessage(msg);
@@ -2007,7 +2012,7 @@ export async function buildChatPromptMessages(
         musicOnlineHint,
         timeContext: promptTimeContext,
         promptTimestampOptions,
-        enableVision: config.enableImageRecognition,
+        enableVision: visionActive,
         timeAware: loadChatAppSettings().timeAware,
         tools: toolsPrompt,
         customAppRichMediaDirectives,
@@ -2665,8 +2670,13 @@ async function generateChatCompletionCore(
         // 900KB 上限（app/api/push/jobs/route.ts），一撞就是整条兜底挂不上、
         // 静默丢掉离线回复——为了第二轮续跑赔掉第一轮，不划算。冷场重连与定时
         // 唤醒是低频任务，那两条照常挂续跑。
-        const bailoutMessages = [...llmMessages];
+        const bailoutMessages = llmMessages.map(m => (
+            Array.isArray(m.content)
+                ? { ...m, content: m.content.map(p => p.type === "text" ? p.text : "[图片]").filter(Boolean).join("\n") }
+                : m
+        ));
         void import("./push-bailout-client").then(async mod => {
+            await new Promise(r => setTimeout(r, 1500));
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
             // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
             maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
@@ -2675,7 +2685,7 @@ async function generateChatCompletionCore(
                 characterName: character.name,
                 userName: userIdentity?.name,
                 regexes,
-                request: buildProviderRequest(config, preset, toLlmRequestMessages(bailoutMessages)),
+                request: buildProviderRequest({ ...config, enableImageRecognition: false }, preset, toLlmRequestMessages(bailoutMessages)),
                 replyAfter: replyAfterMessage
                     ? { localMessageId: replyAfterMessage.id, createdAt: replyAfterMessage.createdAt }
                     : undefined,
@@ -3151,6 +3161,7 @@ export async function previewPromptRequestSnapshot(
             },
             requestKind: "native-tools",
             tools: nativeBundle.definitions,
+            force: true,
         });
     }
 
@@ -3166,5 +3177,6 @@ export async function previewPromptRequestSnapshot(
             debugSessionId: session.id,
         },
         requestKind: "completion",
+        force: true,
     });
 }

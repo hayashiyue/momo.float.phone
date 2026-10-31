@@ -269,10 +269,14 @@ export async function armFollowUpBailout(
         const count = prevCount + 1;
         const messagesWithHint = buildFollowUpSilenceMessages(session, latestMessages, fireAt);
 
+        await new Promise(r => setTimeout(r, 2000));
+        const preCheckSchedule = loadFollowUpSchedule(sessionId);
+        if (!preCheckSchedule || preCheckSchedule.count !== prevCount || Math.abs(preCheckSchedule.fireAt - fireAt) > 1000) return;
+
         const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
             session,
             messagesWithHint,
-            { appTags: ["chat", "text", "followup"], followUpCount: count, followUpDelay: delaySec },
+            { appTags: ["chat", "text", "followup"], followUpCount: count, followUpDelay: delaySec, disableVision: true },
         );
         // 无原生工具重放：服务端执行不了本地工具循环，兜底生成按纯补全组装。
         // 但标记式快捷动作云端是支持的（push-generate 解析【快捷动作：名称】），
@@ -429,7 +433,7 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
             session,
             history,
-            { appTags: ["chat", "text", "idle_wake"], timedWakeElapsedMinutes: elapsedMinutes },
+            { appTags: ["chat", "text", "idle_wake"], timedWakeElapsedMinutes: elapsedMinutes, disableVision: true },
         );
         maybeAppendCallInvite(llmMessages, rule.characterId);
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
@@ -495,7 +499,7 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
         const { llmMessages, character, config, preset, regexes, userIdentity } = await buildChatPromptMessages(
             session,
             history,
-            { appTags: ["chat", "text", wakeTag], timedWakeElapsedMinutes: elapsedMinutes, timedWakeIntent: schedule.intent },
+            { appTags: ["chat", "text", wakeTag], timedWakeElapsedMinutes: elapsedMinutes, timedWakeIntent: schedule.intent, disableVision: true },
         );
         maybeAppendCallInvite(llmMessages, schedule.characterId);
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
@@ -565,7 +569,7 @@ export async function armPeriodCareBailouts(): Promise<void> {
                 const { llmMessages, config: apiConfig, preset, regexes, userIdentity } = await buildChatPromptMessages(
                     session,
                     history,
-                    { appTags: ["chat", "text", "period_care"], periodCareContext: event.context },
+                    { appTags: ["chat", "text", "period_care"], periodCareContext: event.context, disableVision: true },
                 );
                 maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
                 const request = buildProviderRequest(apiConfig, preset, toLlmRequestMessages(llmMessages));
