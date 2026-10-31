@@ -142,10 +142,25 @@ export function loadAllMomentComments(): MomentComment[] {
     return _commentsCache ?? [];
 }
 
+let _commentsIndexedRef: MomentComment[] | null = null;
+const _commentsByPostMap = new Map<string, MomentComment[]>();
+
 export function loadMomentComments(postId: string): MomentComment[] {
-    return loadAllMomentComments()
-        .filter(c => c.postId === postId)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const all = loadAllMomentComments();
+    if (_commentsIndexedRef !== all) {
+        _commentsByPostMap.clear();
+        for (let i = 0; i < all.length; i += 1) {
+            const c = all[i];
+            const list = _commentsByPostMap.get(c.postId);
+            if (list) list.push(c);
+            else _commentsByPostMap.set(c.postId, [c]);
+        }
+        for (const list of _commentsByPostMap.values()) {
+            list.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        }
+        _commentsIndexedRef = all;
+    }
+    return _commentsByPostMap.get(postId) ?? [];
 }
 
 export function addMomentComment(comment: Omit<MomentComment, "id" | "createdAt"> & { createdAt?: string }): MomentComment {

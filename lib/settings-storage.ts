@@ -183,10 +183,16 @@ function preserveCustomAppPresetPrompts(fresh: PresetConfig, previous: PresetCon
 
 // --- Presets ──────────────────────────────────────────
 
+let _presetsMemoRef: PresetConfig[] | null = null;
+let _presetsMemoResult: PresetConfig[] | null = null;
+
 export function loadPresets(): PresetConfig[] {
     if (typeof window === "undefined") return [];
     try {
         const cachedPresets = readPresetsCache();
+        if (_presetsMemoRef === cachedPresets && _presetsMemoResult) {
+            return _presetsMemoResult;
+        }
         const presets: PresetConfig[] = cachedPresets.map(stripDeprecatedPresetFields);
         let shouldPersistCleanup = JSON.stringify(cachedPresets) !== JSON.stringify(presets);
 
@@ -208,6 +214,8 @@ export function loadPresets(): PresetConfig[] {
             savePresets(presets);
         }
 
+        _presetsMemoRef = readPresetsCache();
+        _presetsMemoResult = presets;
         return presets;
     } catch {
         return [];
@@ -541,10 +549,18 @@ function normalizeRegexGroupScopes(group: RegexConfig): RegexConfig {
         : { ...group, rules };
 }
 
+let _regexesMemoRef: RegexConfig[] | null = null;
+let _regexesMemoResult: RegexConfig[] | null = null;
+
 export function loadRegexes(): RegexConfig[] {
     if (typeof window === "undefined") return [];
     try {
-        return readRegexesCache().map(normalizeRegexGroupScopes);
+        const raw = readRegexesCache();
+        if (_regexesMemoRef === raw && _regexesMemoResult) return _regexesMemoResult;
+        const normalized = raw.map(normalizeRegexGroupScopes);
+        _regexesMemoRef = raw;
+        _regexesMemoResult = normalized;
+        return normalized;
     } catch {
         return [];
     }
@@ -655,13 +671,24 @@ function normalizeApiConfig(config: LegacyApiConfig): ApiConfig {
     };
 }
 
+let _apiConfigsMemoRaw: string | null | undefined = undefined;
+let _apiConfigsMemoResult: ApiConfig[] = [];
+
 export function loadApiConfigs(): ApiConfig[] {
     if (typeof window === "undefined") return [];
     try {
         const raw = kvGet(API_CONFIGS_KEY);
-        if (!raw) return [];
+        if (raw === _apiConfigsMemoRaw) return _apiConfigsMemoResult;
+        if (!raw) {
+            _apiConfigsMemoRaw = raw;
+            _apiConfigsMemoResult = [];
+            return [];
+        }
         const parsed = JSON.parse(raw) as LegacyApiConfig[];
-        return Array.isArray(parsed) ? parsed.map(normalizeApiConfig) : [];
+        const result = Array.isArray(parsed) ? parsed.map(normalizeApiConfig) : [];
+        _apiConfigsMemoRaw = raw;
+        _apiConfigsMemoResult = result;
+        return result;
     } catch {
         return [];
     }
@@ -1002,21 +1029,31 @@ function normalizeBindingConfig(config: BindingConfig): { config: BindingConfig;
     };
 }
 
+let _bindingsMemoRaw: string | null | undefined = undefined;
+let _bindingsMemoResult: BindingConfig | null = null;
+
 export function loadBindingConfig(): BindingConfig {
     if (typeof window === "undefined") return { ...DEFAULT_BINDING_CONFIG };
     try {
         const raw = kvGet(BINDINGS_KEY);
+        if (raw && raw === _bindingsMemoRaw && _bindingsMemoResult) {
+            return _bindingsMemoResult;
+        }
         if (!raw) {
             // Attempt migration from legacy overrides
             const migrated = migrateLegacyOverrides();
             if (migrated) {
                 saveBindingConfig(migrated, false);
+                _bindingsMemoRaw = kvGet(BINDINGS_KEY);
+                _bindingsMemoResult = migrated;
                 return migrated;
             }
             return { ...DEFAULT_BINDING_CONFIG };
         }
         const normalized = normalizeBindingConfig(JSON.parse(raw) as BindingConfig);
         if (normalized.changed) saveBindingConfig(normalized.config, false);
+        _bindingsMemoRaw = kvGet(BINDINGS_KEY);
+        _bindingsMemoResult = normalized.config;
         return normalized.config;
     } catch {
         return { ...DEFAULT_BINDING_CONFIG };
@@ -1309,12 +1346,23 @@ export function saveChatSendConfig(config: ChatSendConfig): void {
 
 // --- User Identities ──────────────────────────────────────────
 
+let _userIdentitiesMemoRaw: string | null | undefined = undefined;
+let _userIdentitiesMemoResult: UserIdentity[] = [];
+
 export function loadUserIdentities(): UserIdentity[] {
     if (typeof window === "undefined") return [];
     try {
         const raw = kvGet(USER_IDENTITIES_KEY);
-        if (!raw) return [];
-        return JSON.parse(raw) as UserIdentity[];
+        if (raw === _userIdentitiesMemoRaw) return _userIdentitiesMemoResult;
+        if (!raw) {
+            _userIdentitiesMemoRaw = raw;
+            _userIdentitiesMemoResult = [];
+            return [];
+        }
+        const parsed = JSON.parse(raw) as UserIdentity[];
+        _userIdentitiesMemoRaw = raw;
+        _userIdentitiesMemoResult = Array.isArray(parsed) ? parsed : [];
+        return _userIdentitiesMemoResult;
     } catch {
         return [];
     }

@@ -4398,7 +4398,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
             if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) return;
             longPressTriggeredRef.current = true;
             openOfflineContextMenu(target, anchor);
-        }, 450);
+        }, 320);
     };
 
     const handleOfflineEditStart = (turn: ChatOfflineTurn, role: OfflineActionTarget["role"]) => {
@@ -5140,7 +5140,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent }: Chat
             if (!mountedRef.current || !isChatRoomElementVisible(wrapperRef.current)) return;
             longPressTriggeredRef.current = true;
             openMessageContextMenu(msgId, anchor);
-        }, 450); // 450ms long press
+        }, 320); // 320ms long press
     };
 
     const handleMessagePointerUp = (e: React.PointerEvent) => {
