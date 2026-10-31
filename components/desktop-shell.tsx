@@ -1121,98 +1121,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [draftTheme, setDraftTheme] = useState<ThemeProfile>(() => initialThemeProfile ?? readInitialThemeProfile());
   useEffect(() => {
     activeAppRef.current = activeApp;
-    if (!activeApp) {
-      returnMaskRef.current?.classList.remove("is-pending");
-    }
   }, [activeApp]);
-
-  // 改动 ⑤：返回时「正在返回…」等待遮罩
-  // 在按下返回按钮的 pointerdown 捕获阶段挂 is-pending（CSS transition-delay: 220ms 跑在合成器线程）；
-  // click 后双 rAF 判定：若主线程被桌面/列表切换占住，两帧后 App 已关，由上面的 activeApp effect 收起；
-  // 若 App 仍开着（应用内返回/手指滑开）则立即收回（尚未到 220ms 延迟，不会闪）。
-  // 另配 400ms / 1200ms / 10s 三层墙上时钟兜底，防后台标签页 rAF 不触发导致遮罩滞留。
-  useEffect(() => {
-    const shell = shellRef.current;
-    if (!shell) return;
-    let wallTimer400 = 0;
-    let wallTimer1200 = 0;
-    let wallTimer10s = 0;
-    let raf1 = 0;
-    let raf2 = 0;
-    let pending = false;
-
-    const clearTimers = () => {
-      if (wallTimer400) { window.clearTimeout(wallTimer400); wallTimer400 = 0; }
-      if (wallTimer1200) { window.clearTimeout(wallTimer1200); wallTimer1200 = 0; }
-      if (wallTimer10s) { window.clearTimeout(wallTimer10s); wallTimer10s = 0; }
-      if (raf1) { window.cancelAnimationFrame(raf1); raf1 = 0; }
-      if (raf2) { window.cancelAnimationFrame(raf2); raf2 = 0; }
-    };
-
-    const hideMask = () => {
-      pending = false;
-      clearTimers();
-      returnMaskRef.current?.classList.remove("is-pending");
-    };
-
-    const isBackButton = (target: EventTarget | null): boolean => {
-      if (!(target instanceof Element)) return false;
-      // 聊天室内部（或设置子面板）点返回只是切回会话列表，不退出 App，不挂全屏等待遮罩
-      if (target.closest(".chat-room-layer, .chat-settings-layer")) return false;
-      const btn = target.closest("button, [role='button']");
-      if (!btn) return false;
-      const label = (btn.getAttribute("aria-label") || btn.getAttribute("title") || "").trim();
-      if (label === "返回" || label === "关闭" || label === "返回桌面" || label.startsWith("关闭") || label.startsWith("返回")) {
-        return true;
-      }
-      return false;
-    };
-
-    const onPointerDownCapture = (e: PointerEvent) => {
-      if (!activeAppRef.current) return;
-      if (!isBackButton(e.target)) return;
-      clearTimers();
-      pending = true;
-      returnMaskRef.current?.classList.add("is-pending");
-      // 手指按住未触发 click（如滑开取消）1200ms 兜底，以及 10s 绝对上限兜底
-      wallTimer1200 = window.setTimeout(() => {
-        if (pending) hideMask();
-      }, 1200);
-      wallTimer10s = window.setTimeout(hideMask, 10000);
-    };
-
-    const onPointerCancelCapture = () => {
-      if (!pending) return;
-      wallTimer400 = window.setTimeout(hideMask, 400);
-    };
-
-    const onClickCapture = (e: MouseEvent) => {
-      if (!pending) return;
-      if (!isBackButton(e.target)) {
-        hideMask();
-        return;
-      }
-      if (wallTimer1200) { window.clearTimeout(wallTimer1200); wallTimer1200 = 0; }
-      raf1 = window.requestAnimationFrame(() => {
-        raf1 = 0;
-        raf2 = window.requestAnimationFrame(() => {
-          raf2 = 0;
-          hideMask();
-        });
-      });
-      wallTimer1200 = window.setTimeout(hideMask, 1200);
-    };
-
-    shell.addEventListener("pointerdown", onPointerDownCapture, true);
-    shell.addEventListener("pointercancel", onPointerCancelCapture, true);
-    shell.addEventListener("click", onClickCapture, true);
-    return () => {
-      clearTimers();
-      shell.removeEventListener("pointerdown", onPointerDownCapture, true);
-      shell.removeEventListener("pointercancel", onPointerCancelCapture, true);
-      shell.removeEventListener("click", onClickCapture, true);
-    };
-  }, []);
   // Listen for theme CSS updates from 小卷
   useEffect(() => {
     const onThemeUpdate = () => {
@@ -4927,9 +4836,6 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                   })}
               </footer>
               )}
-              <div ref={returnMaskRef} className="phone-return-mask" aria-hidden="true">
-                <div className="phone-return-pill">正在返回…</div>
-              </div>
               <DebugPromptPanel />
               <QuickActionFloat />
               <MascotFloat />

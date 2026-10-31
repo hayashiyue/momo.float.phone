@@ -759,83 +759,18 @@ export function compareChatMessages(a: ChatMessage, b: ChatMessage): number {
     return a.id.localeCompare(b.id);
 }
 
-let _indexedMessagesRef: ChatMessage[] | null = null;
-let _indexedMessagesLength = -1;
-const _sessionBuckets = new Map<string, ChatMessage[]>();
-const _sessionSortedMemo = new Map<string, ChatMessage[]>();
-const _sessionLastVisibleMemo = new Map<string, ChatMessage | null>();
-
-function invalidateSessionMemo(sessionId?: string): void {
-    if (!sessionId) {
-        _indexedMessagesRef = null;
-        _indexedMessagesLength = -1;
-        _sessionBuckets.clear();
-        _sessionSortedMemo.clear();
-        _sessionLastVisibleMemo.clear();
-        return;
-    }
-    _sessionSortedMemo.delete(sessionId);
-    _sessionLastVisibleMemo.delete(sessionId);
-}
+function invalidateSessionMemo(_sessionId?: string): void {}
+function appendToSessionBucket(_msg: ChatMessage): void {}
+function replaceInSessionBucket(_updated: ChatMessage): void {}
 
 function getSessionBucket(sessionId: string): ChatMessage[] {
-    if (_indexedMessagesRef !== _messagesCache || _indexedMessagesLength !== _messagesCache.length) {
-        _sessionBuckets.clear();
-        _sessionSortedMemo.clear();
-        _sessionLastVisibleMemo.clear();
-        for (let i = 0; i < _messagesCache.length; i += 1) {
-            const msg = _messagesCache[i];
-            const bucket = _sessionBuckets.get(msg.sessionId);
-            if (bucket) bucket.push(msg);
-            else _sessionBuckets.set(msg.sessionId, [msg]);
-        }
-        _indexedMessagesRef = _messagesCache;
-        _indexedMessagesLength = _messagesCache.length;
-    }
-    return _sessionBuckets.get(sessionId) ?? [];
-}
-
-function appendToSessionBucket(msg: ChatMessage): void {
-    if (_indexedMessagesRef === _messagesCache && _indexedMessagesLength === _messagesCache.length - 1) {
-        const bucket = _sessionBuckets.get(msg.sessionId);
-        if (bucket) bucket.push(msg);
-        else _sessionBuckets.set(msg.sessionId, [msg]);
-        _indexedMessagesLength = _messagesCache.length;
-        _sessionSortedMemo.delete(msg.sessionId);
-        if (isSessionPreviewCandidate(msg)) {
-            const prevLast = _sessionLastVisibleMemo.get(msg.sessionId);
-            if (prevLast === undefined) {
-                // will be computed on demand
-            } else if (!prevLast || compareChatMessages(prevLast, msg) <= 0) {
-                _sessionLastVisibleMemo.set(msg.sessionId, msg);
-            } else {
-                _sessionLastVisibleMemo.delete(msg.sessionId);
-            }
-        }
-    } else {
-        invalidateSessionMemo(msg.sessionId);
-    }
-}
-
-function replaceInSessionBucket(updated: ChatMessage): void {
-    if (_indexedMessagesRef === _messagesCache) {
-        const bucket = _sessionBuckets.get(updated.sessionId);
-        if (bucket) {
-            const idx = bucket.findIndex(m => m.id === updated.id);
-            if (idx !== -1) bucket[idx] = updated;
-        }
-    }
-    invalidateSessionMemo(updated.sessionId);
+    return _loadAllMessages().filter(m => m.sessionId === sessionId);
 }
 
 function getSortedSessionMessages(sessionId: string): ChatMessage[] {
-    const bucket = getSessionBucket(sessionId);
-    if (bucket.length === 0) return [];
-    const memo = _sessionSortedMemo.get(sessionId);
-    if (memo) return [...memo];
-    const sorted = [...bucket].sort(compareChatMessages);
-    _sessionSortedMemo.set(sessionId, sorted);
-    return [...sorted];
+    return _loadAllMessages()
+        .filter(m => m.sessionId === sessionId)
+        .sort(compareChatMessages);
 }
 
 function getNextMessageOrder(sessionId: string): number {
@@ -912,19 +847,11 @@ export function reindexSessionMessageOrdersByTime(sessionId: string): void {
 }
 
 export function getLastVisibleSessionMessage(sessionId: string): ChatMessage | null {
-    const bucket = getSessionBucket(sessionId);
-    if (bucket.length === 0) return null;
-    if (_sessionLastVisibleMemo.has(sessionId)) {
-        return _sessionLastVisibleMemo.get(sessionId) ?? null;
+    const sessionMsgs = getSortedSessionMessages(sessionId);
+    for (let i = sessionMsgs.length - 1; i >= 0; i -= 1) {
+        if (isSessionPreviewCandidate(sessionMsgs[i])) return sessionMsgs[i];
     }
-    let last: ChatMessage | null = null;
-    for (let i = 0; i < bucket.length; i += 1) {
-        const msg = bucket[i];
-        if (!isSessionPreviewCandidate(msg)) continue;
-        if (!last || compareChatMessages(last, msg) < 0) last = msg;
-    }
-    _sessionLastVisibleMemo.set(sessionId, last);
-    return last;
+    return null;
 }
 
 // ── Storage Keys (settings & follow-up stay in localStorage) ──
