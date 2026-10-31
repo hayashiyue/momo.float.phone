@@ -352,6 +352,8 @@ export type DebugPromptRequestOptions = {
 
 type ChatPromptBuildOptions = {
     signal?: AbortSignal;
+    /** 离线定时/追问补发时传入预定触发时刻，使角色看到的系统时间与约定时间一致 */
+    referenceTime?: Date;
     followUpCount?: number;
     followUpDelay?: number;
     timedWakeElapsedMinutes?: number;
@@ -1905,7 +1907,9 @@ export async function buildChatPromptMessages(
         ]
         : history;
 
-    const now = new Date();
+    const now = options?.referenceTime instanceof Date && !Number.isNaN(options.referenceTime.getTime())
+        ? options.referenceTime
+        : new Date();
     const promptTimeContext = buildCharacterTimeContext(character.timeZone, now);
     const promptTimestampOptions = getPromptTimestampOptionsForTimeContext(promptTimeContext);
     const memConfig = loadMemoryConfig();

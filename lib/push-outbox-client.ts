@@ -38,6 +38,10 @@ type OutboxEntry = {
 
 let consuming = false;
 let lastConsumeAt = 0;
+
+export function isOutboxConsuming(): boolean {
+    return consuming;
+}
 let consumerInstalled = false;
 let consumeRequestTimer: number | null = null;
 const OUTBOX_BATCH_SIZE = 20;
@@ -230,14 +234,20 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                             name: rawMarker.name,
                         }
                         : undefined;
+                    const effectiveCreatedAt = (typeof meta.armAt === "string" && meta.armAt) ? meta.armAt : entry.created_at;
                     const { hasVisible, newCount, stateValues } = await parseAndSaveResponse(
                         text,
                         sessionId,
                         meta.prevCount ?? 0,
                         followUpIndex,
                         existingMessages,
-                        { silent: options?.silent !== false, ...(shortcutMarker ? { shortcutMarker } : {}) },
+                        {
+                            silent: options?.silent !== false,
+                            createdAt: effectiveCreatedAt,
+                            ...(shortcutMarker ? { shortcutMarker } : {}),
+                        },
                     );
+                    reindexSessionMessageOrdersByTime(sessionId);
                     if (hasVisible && newCount < 10) scheduleFollowUp(sessionId, newCount, stateValues);
                     clearTimedWakeIfHandled(entry.trigger_key);
                     consumedIds.push(entry.id);

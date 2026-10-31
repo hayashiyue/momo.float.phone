@@ -20,6 +20,7 @@ import {
 import type { ChatMessage, StateValue } from "./chat-storage";
 import { generateChatCompletion, flattenCompletionResult } from "./chat-engine";
 import { armFollowUpBailout, armIdleReconnectBailout, cancelBailoutKey, cancelBailoutPrefix, cancelFollowUpBailout, startBailoutHeartbeat } from "./push-bailout-client";
+import { isOutboxConsuming } from "./push-outbox-client";
 import { isWithinPushQuietHours } from "./push-client";
 import {
     IDLE_RECONNECT_MAX_CONSECUTIVE,
@@ -353,7 +354,7 @@ async function saveBackgroundCompletionRounds(
     currentCount: number,
     followUpIndex: number | undefined,
     contextMessages: ChatMessage[],
-    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean },
+    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean; createdAt?: string },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
     let hasVisible = false;
     let newCount = currentCount;
@@ -387,6 +388,7 @@ async function saveBackgroundCompletionRounds(
 
 function pollSchedules() {
     try {
+        if (isOutboxConsuming()) return;
         const schedules = loadAllFollowUpSchedules();
         const now = Date.now();
         for (const sched of schedules) {
@@ -395,6 +397,7 @@ function pollSchedules() {
                 if (remainSec % 10 === 0) console.log(`[FollowUp] Waiting: session=${sched.sessionId}, ${remainSec}s remaining`);
                 continue;
             }
+            if (now < scheduledOutboxGraceUntil) continue;
             if (firingSet.has(sched.sessionId)) continue; // already in-flight
             console.log(`[FollowUp] Firing now for session=${sched.sessionId}, count=${sched.count}`);
             fireFollowUp(sched); // intentionally not awaited — fire & forget
@@ -692,7 +695,8 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
         if (!session || session.contactId !== sched.characterId) return;
 
         const latestMessages = loadChatMessages(session.id);
-        const elapsedMinutes = resolveTimedWakeElapsedMinutes(sched, latestMessages, Date.now());
+        const effectiveFireMs = sched.fireAt > 0 && sched.fireAt <= Date.now() ? sched.fireAt : Date.now();
+        const elapsedMinutes = resolveTimedWakeElapsedMinutes(sched, latestMessages, effectiveFireMs);
 
         console.log("[TimedWake] Dispatching followup-started for session:", session.id);
         backgroundController = beginBackgroundApiRun(session.id);
@@ -708,6 +712,7 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
                 appTags: ["chat", "text", wakeTag],
                 timedWakeElapsedMinutes: elapsedMinutes,
                 timedWakeIntent: sched.intent,
+                referenceTime: new Date(effectiveFireMs),
                 signal: backgroundController.signal,
             },
         );
@@ -723,6 +728,7 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
             0,
             undefined,
             latestMessages,
+            { createdAt: new Date(effectiveFireMs).toISOString() },
         );
         console.log(`[TimedWake] Result: hasVisible=${hasVisible}`);
 
