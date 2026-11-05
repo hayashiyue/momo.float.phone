@@ -1617,8 +1617,27 @@ function PokeBubble({ msg, charName, userName }: { msg: ChatMessage; charName?: 
 // In-memory cache: assetId/name → resolved URL (survives re-renders, cleared on page reload)
 const _stickerUrlCache = new Map<string, string>();
 
-/** Pre-populate sticker cache for a character. Call before rendering messages. */
-export async function prewarmStickerCache(characterId: string): Promise<void> {
+/** Pre-populate sticker cache only for stickers actually used in the visible message window. */
+export async function prewarmStickerCache(characterId: string, onlyNames?: Set<string>): Promise<void> {
+    if (onlyNames && onlyNames.size === 0) return;
+    const { findCustomStickerByName, resolveCustomStickerUrl } = await import("@/lib/custom-sticker-storage");
+    if (onlyNames) {
+        await Promise.all(Array.from(onlyNames).map(async (name) => {
+            const cacheKey = `${characterId}:${name}`;
+            if (_stickerUrlCache.has(cacheKey)) return;
+            const sticker = findCustomStickerByName(characterId, name);
+            if (!sticker) return;
+            if (sticker.externalUrl) {
+                _stickerUrlCache.set(cacheKey, sticker.externalUrl);
+                return;
+            }
+            if (sticker.assetId) {
+                const url = await resolveCustomStickerUrl(sticker.assetId);
+                if (url) _stickerUrlCache.set(cacheKey, url);
+            }
+        }));
+        return;
+    }
     const { resolveCustomStickerMap } = await import("@/lib/custom-sticker-storage");
     const map = await resolveCustomStickerMap(characterId);
     for (const [name, url] of Object.entries(map)) {
@@ -1666,6 +1685,8 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
                 <img
                     src={imgUrl}
                     alt={label || "表情包"}
+                    loading="lazy"
+                    decoding="async"
                     className="w-[120px] h-[120px] object-contain"
                     style={{ WebkitTouchCallout: 'none', userSelect: 'none', pointerEvents: 'none' }}
                 />

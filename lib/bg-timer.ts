@@ -4,6 +4,7 @@
 
 let worker: Worker | null = null;
 const callbacks = new Map<string, () => void>();
+const intervalIds = new Set<string>();
 let idCounter = 0;
 
 function ensureWorker(): Worker | null {
@@ -13,7 +14,12 @@ function ensureWorker(): Worker | null {
         worker = new Worker("/timer-worker.js");
         worker.onmessage = (e) => {
             if (e.data.type === "tick") {
-                const cb = callbacks.get(e.data.id);
+                const id = e.data.id as string;
+                // iOS Safari 后台挂起期间暂停周期性轮询回调，防止后台唤醒跑重任务触发 WebKit 内存超限重启
+                if (intervalIds.has(id) && typeof document !== "undefined" && document.visibilityState === "hidden") {
+                    return;
+                }
+                const cb = callbacks.get(id);
                 if (cb) cb();
             }
         };

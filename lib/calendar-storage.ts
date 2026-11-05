@@ -62,13 +62,23 @@ export function normalizeCalendarTheme(theme: unknown): string {
   return (CALENDAR_THEME_IDS as readonly string[]).includes(mapped) ? mapped : DEFAULT_CALENDAR_CONFIG.theme;
 }
 
+let _calendarStoreMemoRaw: string | null | undefined = undefined;
+let _calendarStoreMemoResult: PersistedCalendarStore = { plans: [] };
+
 function loadStore(): PersistedCalendarStore {
   if (typeof window === "undefined") return { plans: [] };
   try {
     const raw = kvGet(STORAGE_KEY);
-    if (!raw) return { plans: [] };
+    if (raw === _calendarStoreMemoRaw) return _calendarStoreMemoResult;
+    if (!raw) {
+      _calendarStoreMemoRaw = raw;
+      _calendarStoreMemoResult = { plans: [] };
+      return _calendarStoreMemoResult;
+    }
     const parsed = JSON.parse(raw) as Partial<PersistedCalendarStore>;
-    return { plans: Array.isArray(parsed.plans) ? parsed.plans : [] };
+    _calendarStoreMemoRaw = raw;
+    _calendarStoreMemoResult = { plans: Array.isArray(parsed.plans) ? parsed.plans : [] };
+    return _calendarStoreMemoResult;
   } catch {
     return { plans: [] };
   }
@@ -76,7 +86,10 @@ function loadStore(): PersistedCalendarStore {
 
 function saveStore(store: PersistedCalendarStore): void {
   if (typeof window === "undefined") return;
-  kvSet(STORAGE_KEY, JSON.stringify(store));
+  const serialized = JSON.stringify(store);
+  _calendarStoreMemoRaw = serialized;
+  _calendarStoreMemoResult = store;
+  kvSet(STORAGE_KEY, serialized);
 }
 
 export function loadCalendarConfig(): CalendarConfig {

@@ -201,17 +201,28 @@ export function normalizeDiaryEntry(raw: unknown): DiaryEntry | null {
   };
 }
 
+let _diaryEntriesMemoRaw: string | null | undefined = undefined;
+let _diaryEntriesMemoResult: DiaryEntry[] = [];
+
 export function loadDiaryEntries(): DiaryEntry[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(ENTRIES_KEY);
-    if (!raw) return [];
+    if (raw === _diaryEntriesMemoRaw) return _diaryEntriesMemoResult;
+    if (!raw) {
+      _diaryEntriesMemoRaw = raw;
+      _diaryEntriesMemoResult = [];
+      return _diaryEntriesMemoResult;
+    }
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const result = parsed
       .map(normalizeDiaryEntry)
       .filter((entry): entry is DiaryEntry => Boolean(entry))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    _diaryEntriesMemoRaw = raw;
+    _diaryEntriesMemoResult = result;
+    return result;
   } catch {
     return [];
   }
@@ -224,7 +235,10 @@ export function saveDiaryEntries(entries: DiaryEntry[]): void {
     .filter((entry): entry is DiaryEntry => Boolean(entry))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .slice(0, 500);
-  kvSet(ENTRIES_KEY, JSON.stringify(normalized));
+  const serialized = JSON.stringify(normalized);
+  _diaryEntriesMemoRaw = serialized;
+  _diaryEntriesMemoResult = normalized;
+  kvSet(ENTRIES_KEY, serialized);
 }
 
 export function createDiaryEntry(input: DiaryEntryInput): DiaryEntry {

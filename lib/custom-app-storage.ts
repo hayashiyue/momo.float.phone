@@ -777,14 +777,25 @@ function emitUpdated(): void {
   }
 }
 
+let _installedCustomAppsMemoRaw: string | null | undefined = undefined;
+let _installedCustomAppsMemoResult: InstalledCustomApp[] = [];
+
 export function loadInstalledCustomApps(): InstalledCustomApp[] {
   const raw = kvGet(CUSTOM_APPS_KEY);
-  if (!raw) return [];
+  if (raw === _installedCustomAppsMemoRaw) return _installedCustomAppsMemoResult;
+  if (!raw) {
+    _installedCustomAppsMemoRaw = raw;
+    _installedCustomAppsMemoResult = [];
+    return [];
+  }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed)
+    const result = Array.isArray(parsed)
       ? parsed.map(normalizeInstalledApp).filter(Boolean) as InstalledCustomApp[]
       : [];
+    _installedCustomAppsMemoRaw = raw;
+    _installedCustomAppsMemoResult = result;
+    return result;
   } catch {
     return [];
   }
@@ -792,7 +803,10 @@ export function loadInstalledCustomApps(): InstalledCustomApp[] {
 
 export function saveInstalledCustomApps(apps: InstalledCustomApp[], notify = true): InstalledCustomApp[] {
   const normalized = apps.map(normalizeInstalledApp).filter(Boolean) as InstalledCustomApp[];
-  kvSet(CUSTOM_APPS_KEY, JSON.stringify(normalized));
+  const serialized = JSON.stringify(normalized);
+  _installedCustomAppsMemoRaw = serialized;
+  _installedCustomAppsMemoResult = normalized;
+  kvSet(CUSTOM_APPS_KEY, serialized);
   if (notify) emitUpdated();
   return normalized;
 }

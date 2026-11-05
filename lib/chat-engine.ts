@@ -173,17 +173,22 @@ async function rasterizeImageBlobToJpegDataUrl(blob: Blob): Promise<string | nul
         const width = Math.max(1, Math.round(sourceWidth * scale));
         const height = Math.max(1, Math.round(sourceHeight * scale));
         const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const context = canvas.getContext("2d");
-        if (!context) return null;
+        try {
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext("2d");
+            if (!context) return null;
 
-        context.fillStyle = "#fff";
-        context.fillRect(0, 0, width, height);
-        context.drawImage(image, 0, 0, width, height);
+            context.fillStyle = "#fff";
+            context.fillRect(0, 0, width, height);
+            context.drawImage(image, 0, 0, width, height);
 
-        const compressed = await canvasToBlob(canvas, "image/jpeg", LLM_IMAGE_JPEG_QUALITY);
-        return compressed ? blobToDataUrl(compressed) : null;
+            const compressed = await canvasToBlob(canvas, "image/jpeg", LLM_IMAGE_JPEG_QUALITY);
+            return compressed ? blobToDataUrl(compressed) : null;
+        } finally {
+            canvas.width = 0;
+            canvas.height = 0;
+        }
     } catch {
         return null;
     }
@@ -210,12 +215,16 @@ function isLikelyGifImageRef(imageRef: string): boolean {
 
 async function fetchRemoteImageBlob(url: string): Promise<Blob | null> {
     if (typeof fetch === "undefined") return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
     try {
-        const response = await fetch(url);
+        const response = await fetch(url, { signal: controller.signal });
         if (!response.ok) return null;
-        return response.blob();
+        return await response.blob();
     } catch {
         return null;
+    } finally {
+        clearTimeout(timer);
     }
 }
 
@@ -2677,16 +2686,24 @@ async function generateChatCompletionCore(
         // 900KB 上限（app/api/push/jobs/route.ts），一撞就是整条兜底挂不上、
         // 静默丢掉离线回复——为了第二轮续跑赔掉第一轮，不划算。冷场重连与定时
         // 唤醒是低频任务，那两条照常挂续跑。
-        const bailoutMessages = [...llmMessages];
-        // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
-        maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
         void import("./push-bailout-client").then(async mod => {
+            await new Promise(r => setTimeout(r, 6000));
+            if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
+            if (!(await mod.canArmReplyBailout())) return;
+            if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
+            const bailoutMessages = llmMessages.map(m => (
+                Array.isArray(m.content)
+                    ? { ...m, content: m.content.map(p => p.type === "text" ? p.text : "[图片]").filter(Boolean).join("\n") }
+                    : { ...m }
+            ));
+            // 这条路径不挂续跑（见上），所以也不能向角色承诺第二轮
+            maybeAppendShortcutCapability(bailoutMessages, { continuationAvailable: false });
             const handle = await mod.armReplyBailout({
                 sessionId: session.id,
                 characterName: character.name,
                 userName: userIdentity?.name,
                 regexes,
-                request: buildProviderRequest(config, preset, toLlmRequestMessages(bailoutMessages)),
+                request: buildProviderRequest({ ...config, enableImageRecognition: false }, preset, toLlmRequestMessages(bailoutMessages)),
                 replyAfter: replyAfterMessage
                     ? { localMessageId: replyAfterMessage.id, createdAt: replyAfterMessage.createdAt }
                     : undefined,
@@ -3003,16 +3020,14 @@ async function generateChatCompletionCore(
         }
     }
 
-    // Memory: increment event counter + check if summarization needed (non-blocking)
-    (async () => {
-        try {
-            incrementEventCounter(character.id); // user message
-            incrementEventCounter(character.id); // AI reply
-            await maybeRunSummarization(character.id, character.name);
-        } catch (err) {
+    // Memory: increment event counter + check if summarization needed (delayed so it never collides with bubble rendering / follow-up scheduling)
+    incrementEventCounter(character.id); // user message
+    incrementEventCounter(character.id); // AI reply
+    window.setTimeout(() => {
+        void maybeRunSummarization(character.id, character.name).catch(err => {
             console.warn("[ChatEngine] Memory counter/summarization failed:", err);
-        }
-    })();
+        });
+    }, 6_000);
 
     return { parts };
 }

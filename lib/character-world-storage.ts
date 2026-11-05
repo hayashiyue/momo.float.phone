@@ -210,19 +210,47 @@ function normalizeGroups(groups: CharacterWorldGroup[], characters: Character[])
     return { groups: normalized, changed };
 }
 
+let _worldGroupsMemoRaw: string | null | undefined = undefined;
+let _worldGroupsMemoCharsRef: Character[] | null = null;
+let _worldGroupsMemoIdentitiesRef: ReturnType<typeof loadUserIdentities> | null = null;
+let _worldGroupsMemoResult: CharacterWorldGroup[] | null = null;
+
 export function loadCharacterWorldGroups(): CharacterWorldGroup[] {
     const characters = loadCharacters();
-    const { groups, changed } = normalizeGroups(parseGroups(kvGet(CHARACTER_WORLDS_KEY)), characters);
-    if (changed && isBrowser()) {
-        kvSet(CHARACTER_WORLDS_KEY, JSON.stringify(groups));
+    const identities = loadUserIdentities();
+    const raw = kvGet(CHARACTER_WORLDS_KEY);
+    if (
+        _worldGroupsMemoResult
+        && raw === _worldGroupsMemoRaw
+        && characters === _worldGroupsMemoCharsRef
+        && identities === _worldGroupsMemoIdentitiesRef
+    ) {
+        return _worldGroupsMemoResult;
     }
+    const { groups, changed } = normalizeGroups(parseGroups(raw), characters);
+    if (changed && isBrowser()) {
+        const serialized = JSON.stringify(groups);
+        kvSet(CHARACTER_WORLDS_KEY, serialized);
+        _worldGroupsMemoRaw = serialized;
+    } else {
+        _worldGroupsMemoRaw = raw;
+    }
+    _worldGroupsMemoCharsRef = characters;
+    _worldGroupsMemoIdentitiesRef = identities;
+    _worldGroupsMemoResult = groups;
     return groups;
 }
 
 export function saveCharacterWorldGroups(groups: CharacterWorldGroup[]): void {
-    const { groups: normalized } = normalizeGroups(groups, loadCharacters());
+    const characters = loadCharacters();
+    const { groups: normalized } = normalizeGroups(groups, characters);
     if (!isBrowser()) return;
-    kvSet(CHARACTER_WORLDS_KEY, JSON.stringify(normalized));
+    const serialized = JSON.stringify(normalized);
+    kvSet(CHARACTER_WORLDS_KEY, serialized);
+    _worldGroupsMemoRaw = serialized;
+    _worldGroupsMemoCharsRef = characters;
+    _worldGroupsMemoIdentitiesRef = loadUserIdentities();
+    _worldGroupsMemoResult = normalized;
     dispatchUpdated();
 }
 

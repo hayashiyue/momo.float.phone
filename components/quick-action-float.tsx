@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type CSSProperties } from "react";
-import { BookOpen, Check, ChevronDown, Code2, FlaskConical, ImageIcon, Loader2, RefreshCw, SlidersHorizontal, UserRound, X } from "lucide-react";
+import { BookOpen, Check, ChevronDown, ChevronRight, Code2, FlaskConical, Folder, ImageIcon, Loader2, RefreshCw, SlidersHorizontal, UserRound, X } from "lucide-react";
 import { CHAT_APP_SETTINGS_UPDATED_EVENT, loadChatAppSettings } from "@/lib/chat-storage";
 import {
     getFloatingDockState,
@@ -15,6 +15,7 @@ import {
 import {
     getCharacterBinding,
     loadApiConfigs,
+    loadApiGroups,
     loadBindingConfig,
     loadWorldBooks,
     saveBindingConfig,
@@ -23,7 +24,8 @@ import {
     loadImageGenerationSettings,
     saveImageGenerationSettings,
 } from "@/lib/settings-storage";
-import type { ApiConfig, BindingConfig, BindingSlot, WorldBookConfig, ImageGenerationSettings } from "@/lib/settings-types";
+import type { ApiConfig, ApiGroup, BindingConfig, BindingSlot, WorldBookConfig, ImageGenerationSettings } from "@/lib/settings-types";
+import { buildGroupedApiView, toggleApiGroupCollapsed } from "@/lib/api-groups";
 import { applyImageGenerationBinding, getActiveImageGenerationBindingId, getImageGenerationBindingOptions } from "@/lib/image-generation-binding";
 import { fetchImageGenerationModels, fetchNovelAiModels, filterLikelyImageModels, generateImageFromConfiguredApi } from "@/lib/image-generation-service";
 import { NOVELAI_COMMON_MODELS } from "@/lib/novelai-image-config";
@@ -70,6 +72,7 @@ export function QuickActionFloat() {
     const [selectedCharId, setSelectedCharId] = useState("");
     const [config, setConfig] = useState<BindingConfig>(EMPTY_BINDING_CONFIG);
     const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([]);
+    const [apiGroups, setApiGroups] = useState<ApiGroup[]>([]);
     const [worldBooks, setWorldBooks] = useState<WorldBookConfig[]>([]);
     const [characters, setCharacters] = useState<Character[]>([]);
     const [fetchedModels, setFetchedModels] = useState<Record<string, string[]>>({});
@@ -103,6 +106,7 @@ export function QuickActionFloat() {
         const nextCharacters = loadCharacters();
         setConfig(loadBindingConfig());
         setApiConfigs(loadApiConfigs());
+        setApiGroups(loadApiGroups());
         setImageSettings(loadImageGenerationSettings());
         setWorldBooks(loadWorldBooks());
         setCharacters(nextCharacters);
@@ -706,19 +710,46 @@ export function QuickActionFloat() {
                                 </button>
                                 {apiConfigs.length === 0 ? (
                                     <div className="quick-action-empty">暂无 API 配置</div>
-                                ) : apiConfigs.map(api => (
-                                    <button
-                                        type="button"
-                                        key={api.id}
-                                        className="quick-action-option"
-                                        data-selected={currentSlot.apiConfigId === api.id}
-                                        disabled={characterDisabled || modelBusy !== null}
-                                        onClick={event => { updateApiConfig(api.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}
-                                    >
-                                        <span>{api.name || api.defaultModel || api.provider}</span>
-                                        {currentSlot.apiConfigId === api.id ? <Check size={15} /> : null}
-                                    </button>
-                                ))}
+                                ) : (() => {
+                                    const grouped = buildGroupedApiView(apiConfigs, apiGroups);
+                                    const renderOption = (api: ApiConfig) => (
+                                        <button
+                                            type="button"
+                                            key={api.id}
+                                            className="quick-action-option"
+                                            data-selected={currentSlot.apiConfigId === api.id}
+                                            disabled={characterDisabled || modelBusy !== null}
+                                            onClick={event => { updateApiConfig(api.id); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+                                        >
+                                            <span>{api.name || api.defaultModel || api.provider}</span>
+                                            {currentSlot.apiConfigId === api.id ? <Check size={15} /> : null}
+                                        </button>
+                                    );
+                                    return (
+                                        <>
+                                            {grouped.sections.map(({ group, items }) => (
+                                                <div key={group.id} className="flex flex-col gap-1">
+                                                    <button
+                                                        type="button"
+                                                        className="api-group-title-btn px-2 py-1"
+                                                        onClick={(e) => {
+                                                            e.preventDefault();
+                                                            e.stopPropagation();
+                                                            setApiGroups(prev => toggleApiGroupCollapsed(group.id, prev));
+                                                        }}
+                                                    >
+                                                        {group.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                                                        <Folder size={13} />
+                                                        <span className="truncate">{group.name}</span>
+                                                        <span className="api-group-count">{items.length}</span>
+                                                    </button>
+                                                    {!group.collapsed && items.map(renderOption)}
+                                                </div>
+                                            ))}
+                                            {grouped.ungrouped.map(renderOption)}
+                                        </>
+                                    );
+                                })()}
                             </div>
                             </details>
                             <div className="quick-action-model-tools" data-disabled={!activeApiConfig ? "" : undefined}>

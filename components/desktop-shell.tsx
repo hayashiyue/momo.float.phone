@@ -1985,16 +1985,22 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     };
   }, [desktopReady]);
 
+  const loadedThemeAssetIdsRef = useRef<Set<string>>(new Set(Object.keys(initialThemeAssets ?? {})));
+
   useEffect(() => {
-    const ids = collectThemeAssetIds(draftTheme);
-    if (ids.length === 0) {
+    const allIds = collectThemeAssetIds(draftTheme);
+    const missingIds = allIds.filter((id) => !loadedThemeAssetIdsRef.current.has(id));
+    if (missingIds.length === 0) {
       return;
     }
 
     let disposed = false;
-    void getThemeAssetMap(ids).then((map) => {
+    void getThemeAssetMap(missingIds).then((map) => {
       if (disposed) {
         return;
+      }
+      for (const id of Object.keys(map)) {
+        loadedThemeAssetIdsRef.current.add(id);
       }
       setThemeAssets((previous) => ({ ...previous, ...map }));
     });

@@ -1,10 +1,19 @@
 "use client";
 
 import { useState, useEffect, useCallback, useContext } from "react";
-import { Plus, RefreshCw, Rss, AlertCircle, FileEdit, Trash2, X, Check } from "lucide-react";
+import { Plus, RefreshCw, Rss, AlertCircle, FileEdit, Trash2, X, Check, Folder, FolderPlus, ChevronDown, ChevronRight, Pencil } from "lucide-react";
 import { SettingsContext } from "../phone-settings-app";
-import type { ApiConfig } from "@/lib/settings-types";
-import { loadApiConfigs, removeApiConfigReferences, saveApiConfigs } from "@/lib/settings-storage";
+import type { ApiConfig, ApiGroup } from "@/lib/settings-types";
+import { loadApiConfigs, loadApiGroups, removeApiConfigReferences, saveApiConfigs, saveApiGroups } from "@/lib/settings-storage";
+import {
+    buildGroupedApiView,
+    createApiGroup,
+    renameApiGroup,
+    toggleApiGroupCollapsed,
+    deleteApiGroupAndRelease,
+    moveApiConfigToGroup,
+} from "@/lib/api-groups";
+import { useApiDrag } from "@/lib/use-api-drag";
 import { generateEmbedding, isEmbeddingModelName } from "@/lib/memory-embedding";
 import { ConfirmDialog } from "@/components/ui/modal";
 import { Toggle, Input } from "@/components/ui/form";
@@ -34,9 +43,12 @@ function getNativeToolProtocolLabel(config: ApiConfig): string {
 export function ApiSettings() {
     const { setSubpageRightAction } = useContext(SettingsContext);
     const [configs, setConfigs] = useState<ApiConfig[]>([]);
+    const [groups, setGroups] = useState<ApiGroup[]>([]);
     const [editingId, setEditingId] = useState<string | null>(null);
     const [isNewConfig, setIsNewConfig] = useState(false);
     const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+    const [confirmDeleteGroupId, setConfirmDeleteGroupId] = useState<string | null>(null);
+    const [folderModal, setFolderModal] = useState<{ mode: "create" | "rename"; groupId?: string; name: string } | null>(null);
     const [isLoaded, setIsLoaded] = useState(false);
 
     // Testing and Fetching states
@@ -54,6 +66,7 @@ export function ApiSettings() {
             setConfigs(DEFAULT_CONFIGS);
             saveApiConfigs(DEFAULT_CONFIGS);
         }
+        setGroups(loadApiGroups());
         setIsLoaded(true);
     }, []);
 
@@ -61,6 +74,18 @@ export function ApiSettings() {
         setConfigs(newConfigs);
         saveApiConfigs(newConfigs);
     }, []);
+
+    const handleDropToGroup = useCallback((configId: string, targetGroupId: string | undefined) => {
+        setConfigs(prev => moveApiConfigToGroup(configId, targetGroupId, prev));
+    }, []);
+
+    const {
+        dragState,
+        handleCardPointerDown,
+        handleCardPointerMove,
+        handleCardPointerEnd,
+        consumeClickSuppression,
+    } = useApiDrag(handleDropToGroup);
 
     const addConfig = useCallback(() => {
         const newConfig: ApiConfig = {
@@ -211,13 +236,81 @@ export function ApiSettings() {
 
     if (!isLoaded) return null;
 
-    return (
-        <div className="flex flex-col gap-6">
-            <div className="flex items-center">
-                <h2 className="m-0 mx-2 ts-28 font-bold italic leading-none text-black">API Settings</h2>
-            </div>
+    const groupedView = buildGroupedApiView(configs, groups);
 
-            {configs.length === 0 ? (
+    const renderConfigCard = (config: ApiConfig) => (
+        <div
+            key={config.id}
+            className="ui-config-card min-w-0 cursor-pointer select-none"
+            style={{ aspectRatio: "3 / 2", padding: "12px", justifyContent: "space-between", WebkitTouchCallout: "none" }}
+            data-dragging={dragState?.configId === config.id ? "true" : undefined}
+            role="button"
+            tabIndex={0}
+            aria-label={`编辑 ${config.name || config.provider}`}
+            onPointerDown={(e) => handleCardPointerDown(e, config.id, config.name || config.provider)}
+            onPointerMove={handleCardPointerMove}
+            onPointerUp={handleCardPointerEnd}
+            onPointerCancel={handleCardPointerEnd}
+            onClick={() => {
+                if (consumeClickSuppression()) return;
+                setEditingId(config.id);
+            }}
+            onKeyDown={(event) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setEditingId(config.id);
+                }
+            }}
+        >
+            <div className="min-w-0 flex flex-col gap-1">
+                <span className="truncate text-[calc(14.4px*var(--app-text-scale,1))] font-bold leading-tight text-[var(--c-text-title)]">{config.name || config.provider}</span>
+                <span className="menu-desc truncate">{config.defaultModel || config.provider || "未设置模型"}</span>
+            </div>
+            <div className="flex gap-2 shrink-0 items-center justify-end">
+                <button
+                    type="button"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setEditingId(config.id);
+                    }}
+                    className="ui-link-btn"
+                >
+                    <FileEdit size={18} />
+                </button>
+                <button
+                    type="button"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setConfirmDeleteId(config.id);
+                    }}
+                    className="ui-link-btn"
+                    data-variant="danger"
+                >
+                    <Trash2 size={18} />
+                </button>
+            </div>
+        </div>
+    );
+
+    return (
+        <div className="flex flex-col gap-4">
+            <div className="api-group-toolbar">
+                <h2 className="m-0 mx-2 ts-28 font-bold italic leading-none text-black">API Settings</h2>
+                <button
+                    type="button"
+                    onClick={() => setFolderModal({ mode: "create", name: "" })}
+                    className="ui-btn ui-btn-outline rounded-[18px] h-9 px-3 text-xs font-semibold gap-1.5"
+                >
+                    <FolderPlus size={15} />
+                    <span>新建文件夹</span>
+                </button>
+            </div>
+            {groups.length > 0 && (
+                <span className="menu-desc mx-2 -mt-2">长按 API 卡片可拖拽移入文件夹或未分组区域</span>
+            )}
+
+            {configs.length === 0 && groups.length === 0 ? (
                 <div className="ui-empty">
                     <div className="ui-icon-circle">
                         <AlertCircle size={24} />
@@ -231,53 +324,69 @@ export function ApiSettings() {
                     </button>
                 </div>
             ) : (
-                <div className="grid grid-cols-2 gap-3">
-                    {configs.map(config => (
+                <div className="flex flex-col gap-3">
+                    {groupedView.sections.map(({ group, items }) => (
                         <div
-                            key={config.id}
-                            className="ui-config-card min-w-0 cursor-pointer"
-                            style={{ aspectRatio: "3 / 2", padding: "12px", justifyContent: "space-between" }}
-                            role="button"
-                            tabIndex={0}
-                            aria-label={`编辑 ${config.name || config.provider}`}
-                            onClick={() => setEditingId(config.id)}
-                            onKeyDown={(event) => {
-                                if (event.target !== event.currentTarget) return;
-                                if (event.key === "Enter" || event.key === " ") {
-                                    event.preventDefault();
-                                    setEditingId(config.id);
-                                }
-                            }}
+                            key={group.id}
+                            className="api-group-section"
+                            data-api-drop-group={group.id}
+                            data-drop-over={dragState?.overGroupId === group.id ? "true" : undefined}
                         >
-                            <div className="min-w-0 flex flex-col gap-1">
-                                <span className="truncate text-[calc(14.4px*var(--app-text-scale,1))] font-bold leading-tight text-[var(--c-text-title)]">{config.name || config.provider}</span>
-                                <span className="menu-desc truncate">{config.defaultModel || config.provider || "未设置模型"}</span>
-                            </div>
-                            <div className="flex gap-2 shrink-0 items-center justify-end">
+                            <div className="api-group-header">
                                 <button
                                     type="button"
-                                    onClick={(event) => {
-                                        event.stopPropagation();
-                                        setEditingId(config.id);
-                                    }}
-                                    className="ui-link-btn"
+                                    className="api-group-title-btn"
+                                    onClick={() => setGroups(prev => toggleApiGroupCollapsed(group.id, prev))}
                                 >
-                                    <FileEdit size={18} />
+                                    {group.collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                                    <Folder size={15} />
+                                    <span className="truncate">{group.name}</span>
+                                    <span className="api-group-count">{items.length}</span>
                                 </button>
-                                <button
-                                    type="button"
-                                    onClick={(event) => {
-                                        event.stopPropagation();
-                                        setConfirmDeleteId(config.id);
-                                    }}
-                                    className="ui-link-btn"
-                                    data-variant="danger"
-                                >
-                                    <Trash2 size={18} />
-                                </button>
+                                <div className="api-group-actions">
+                                    <button
+                                        type="button"
+                                        className="api-group-icon-btn"
+                                        title="重命名文件夹"
+                                        onClick={() => setFolderModal({ mode: "rename", groupId: group.id, name: group.name })}
+                                    >
+                                        <Pencil size={14} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="api-group-icon-btn"
+                                        data-variant="danger"
+                                        title="删除文件夹（保留内部API）"
+                                        onClick={() => setConfirmDeleteGroupId(group.id)}
+                                    >
+                                        <Trash2 size={14} />
+                                    </button>
+                                </div>
                             </div>
+                            {!group.collapsed && (
+                                items.length === 0 ? (
+                                    <div className="menu-desc py-2 px-1 text-center">长按拖拽 API 卡片到此文件夹，或在编辑配置中选择所属文件夹</div>
+                                ) : (
+                                    <div className="grid grid-cols-2 gap-3">
+                                        {items.map(renderConfigCard)}
+                                    </div>
+                                )
+                            )}
                         </div>
                     ))}
+
+                    <div
+                        className="api-ungrouped-zone"
+                        data-api-drop-group="__ungrouped__"
+                        data-drop-over={dragState?.overGroupId === "__ungrouped__" ? "true" : undefined}
+                    >
+                        {groups.length > 0 && groupedView.ungrouped.length > 0 && (
+                            <span className="menu-desc px-1 font-semibold">未分组 ({groupedView.ungrouped.length})</span>
+                        )}
+                        <div className="grid grid-cols-2 gap-3">
+                            {groupedView.ungrouped.map(renderConfigCard)}
+                        </div>
+                    </div>
                 </div>
             )}
 
@@ -305,6 +414,21 @@ export function ApiSettings() {
                                                 placeholder="例如: 我的 OpenAI"
                                             />
                                         </div>
+                                        {groups.length > 0 && (
+                                            <div className="flex flex-col gap-1">
+                                                <label className="menu-desc ml-1">所属文件夹 (Folder)</label>
+                                                <select
+                                                    value={config.groupId || ""}
+                                                    onChange={(e) => updateConfig(config.id, { groupId: e.target.value || undefined })}
+                                                    className="ui-select"
+                                                >
+                                                    <option value="">未分组</option>
+                                                    {groups.map(g => (
+                                                        <option key={g.id} value={g.id}>{g.name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        )}
                                         <div className="flex flex-col gap-1">
                                             <label className="menu-desc ml-1">服务商 (Provider)</label>
                                             <select
@@ -467,6 +591,64 @@ export function ApiSettings() {
                     }}
                     onCancel={() => setConfirmDeleteId(null)}
                 />
+            )}
+
+            {confirmDeleteGroupId && (
+                <ConfirmDialog
+                    title="删除文件夹？"
+                    message="只会移除该文件夹外壳，文件夹内的所有 API 配置会自动释放回「未分组」，不会丢失。"
+                    icon={Folder}
+                    variant="danger"
+                    confirmLabel="删除文件夹"
+                    cancelLabel="取消"
+                    onConfirm={() => {
+                        const next = deleteApiGroupAndRelease(confirmDeleteGroupId, groups, configs);
+                        setGroups(next.groups);
+                        setConfigs(next.configs);
+                        setConfirmDeleteGroupId(null);
+                    }}
+                    onCancel={() => setConfirmDeleteGroupId(null)}
+                />
+            )}
+
+            {folderModal && (
+                <div className="modal-overlay" onClick={() => setFolderModal(null)}>
+                    <div className="modal-dialog" onClick={e => e.stopPropagation()}>
+                        <span className="modal-header-title">{folderModal.mode === "create" ? "新建 API 文件夹" : "重命名文件夹"}</span>
+                        <Input
+                            type="text"
+                            autoFocus
+                            value={folderModal.name}
+                            onChange={e => setFolderModal(prev => prev ? { ...prev, name: e.target.value } : null)}
+                            placeholder="输入文件夹名称..."
+                        />
+                        <div className="grid w-full grid-cols-2 gap-2 mt-2">
+                            <button type="button" className="ui-btn ui-btn-ghost" onClick={() => setFolderModal(null)}>取消</button>
+                            <button
+                                type="button"
+                                className="ui-btn ui-btn-primary"
+                                disabled={!folderModal.name.trim()}
+                                onClick={() => {
+                                    if (folderModal.mode === "create") {
+                                        setGroups(prev => createApiGroup(folderModal.name, prev));
+                                    } else if (folderModal.groupId) {
+                                        setGroups(prev => renameApiGroup(folderModal.groupId!, folderModal.name, prev));
+                                    }
+                                    setFolderModal(null);
+                                }}
+                            >确认</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {dragState && (
+                <div
+                    className="api-drag-ghost"
+                    style={{ left: dragState.clientX, top: dragState.clientY }}
+                >
+                    正在移动：{dragState.configName}
+                </div>
             )}
         </div>
     );

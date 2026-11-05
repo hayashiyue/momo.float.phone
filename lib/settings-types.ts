@@ -165,6 +165,14 @@ export type ApiConfig = {
     enableImageRecognition: boolean;
     enableImageGeneration: boolean;
     preventEmptyGenerateRambling?: boolean;
+    /** 所属 API 文件夹 id；空或未匹配到现有文件夹时归入未分组 */
+    groupId?: string;
+};
+
+export type ApiGroup = {
+    id: string;
+    name: string;
+    collapsed?: boolean;
 };
 
 // --- VoiceApiConfig (migrated from voice-settings.tsx) ---

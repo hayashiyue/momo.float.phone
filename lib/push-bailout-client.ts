@@ -116,6 +116,12 @@ export function startBailoutHeartbeat(triggerKey: string): () => void {
 
 export type ReplyBailoutHandle = { settle: () => void };
 
+/** 轻量预检：未开启个人云推送或无推送订阅时直接跳过，避免在生成中白白拷贝与序列化大体积 Prompt */
+export async function canArmReplyBailout(): Promise<boolean> {
+    if (!bailoutEnabled()) return false;
+    return hasAccountPushSubscription();
+}
+
 /**
  * 发送兜底：本地开始生成回复的同时，把同一份请求快照（无工具的非流式孪生）
  * 预约到服务端，租约 90s、心跳续命。本地完成（成功或失败）即撤销；

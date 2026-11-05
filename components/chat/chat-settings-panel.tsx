@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
     CHAT_INITIAL_VISIBLE_MESSAGE_COUNT,
     CHAT_LOAD_MORE_MESSAGE_COUNT,
@@ -317,7 +317,7 @@ function fileToAvatarDataUrl(file: File, maxSize = 640, quality = 0.86): Promise
     });
 }
 
-export function ChatSettingsPanel({
+export const ChatSettingsPanel = memo(function ChatSettingsPanel({
     session,
     onClose,
     onJumpToMessage,
@@ -2264,4 +2264,4 @@ export function ChatSettingsPanel({
             )}
         </PageShell>
     );
-}
+}, (prev, next) => prev.session === next.session && prev.offlineHistoryBusy === next.offlineHistoryBusy);

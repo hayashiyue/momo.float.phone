@@ -70,11 +70,21 @@ export function getMixBuiltin(id: string): MixMaterial | null {
     return listMixBuiltins().find((m) => m.id === id) ?? null;
 }
 
+const _mixJsonMemo = new Map<string, { raw: string; value: unknown }>();
+
 function readJson<T>(key: string, fallback: T): T {
     const raw = kvGet(key);
-    if (!raw) return fallback;
+    if (!raw) {
+        _mixJsonMemo.delete(key);
+        return fallback;
+    }
+    const cached = _mixJsonMemo.get(key);
+    if (cached && cached.raw === raw) {
+        return (cached.value ?? fallback) as T;
+    }
     try {
         const parsed = JSON.parse(raw);
+        _mixJsonMemo.set(key, { raw, value: parsed });
         return (parsed ?? fallback) as T;
     } catch {
         return fallback;
@@ -82,7 +92,9 @@ function readJson<T>(key: string, fallback: T): T {
 }
 
 function writeJson(key: string, value: unknown): void {
-    kvSet(key, JSON.stringify(value));
+    const serialized = JSON.stringify(value);
+    _mixJsonMemo.set(key, { raw: serialized, value });
+    kvSet(key, serialized);
 }
 
 // ---------- 创作者资料 ----------

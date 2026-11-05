@@ -1847,7 +1847,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         const charIds = session.isGroup && session.participantIds
             ? session.participantIds
             : [session.contactId];
-        Promise.all(charIds.map(id => prewarmStickerCache(id))).then(() => {
+        const usedStickerNames = new Set(
+            msgs
+                .filter(m => m.mediaType === "sticker" && m.mediaData?.label)
+                .map(m => m.mediaData!.label!)
+        );
+        Promise.all(charIds.map(id => prewarmStickerCache(id, usedStickerNames))).then(() => {
             setStickerReady(true);
             needsInitialScrollRef.current = true;
             prevMsgCountRef.current = 0;
@@ -3170,12 +3175,20 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         };
 
         // Display messages one by one with staggered delays; update preview and notice with the same rhythm.
-        // 流式预览已经按段展示过一遍时（instantReveal）直接全部放出，避免二次「重播」。
-        if (messageDrafts.length <= 1 || options?.instantReveal) {
+        // 流式预览已经按段展示过一遍时（instantReveal）或页面/聊天室在后台隐藏时直接全部落库，避免后台 setTimeout 被 iOS 冻结导致切回前台时时间戳漂移与重启。
+        const shouldPublishImmediately = messageDrafts.length <= 1
+            || options?.instantReveal
+            || (typeof document !== "undefined" && document.visibilityState === "hidden")
+            || !isChatRoomElementVisible(wrapperRef.current);
+        if (shouldPublishImmediately) {
             messageDrafts.forEach(publishVisibleMessage);
         } else {
             publishVisibleMessage(messageDrafts[0]);
             for (let i = 1; i < messageDrafts.length; i++) {
+                if ((typeof document !== "undefined" && document.visibilityState === "hidden") || !isChatRoomElementVisible(wrapperRef.current)) {
+                    publishVisibleMessage(messageDrafts[i]);
+                    continue;
+                }
                 await abortableDelay(800, options?.signal);
                 throwIfGenerationStopped(options);
                 publishVisibleMessage(messageDrafts[i]);
@@ -3444,11 +3457,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                         onStreamDelta: (delta) => {
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
+                            if (!isChatRoomElementVisible(wrapperRef.current)) return;
                             // 群聊全文解析较重：合并到 rAF 下一帧执行，避免一帧多段增量重复解析
                             if (streamParseFrameRef.current) return;
                             streamParseFrameRef.current = window.requestAnimationFrame(() => {
                                 streamParseFrameRef.current = 0;
-                                if (!isCurrentGeneration()) return;
+                                if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                                 const nameToId = new Map(groupCharacters.map(item => [item.name, item.id]));
                                 const rawParts = parseGroupChatResponse(streamAccumRef.current, nameToId);
                                 const parts = rawParts
@@ -3491,11 +3505,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                         onStreamDelta: (delta) => {
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
+                            if (!isChatRoomElementVisible(wrapperRef.current)) return;
                             // 预览更新合并到 rAF 下一帧：每帧最多一次全文净化+setState，避免高频增量卡顿
                             if (streamParseFrameRef.current) return;
                             streamParseFrameRef.current = window.requestAnimationFrame(() => {
                                 streamParseFrameRef.current = 0;
-                                if (!isCurrentGeneration()) return;
+                                if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                                 setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                             });
                         },
@@ -3803,11 +3818,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                     onStreamDelta: (delta) => {
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
+                        if (!isChatRoomElementVisible(wrapperRef.current)) return;
                         // 群聊全文解析较重：合并到 rAF 下一帧执行，避免一帧多段增量重复解析
                         if (streamParseFrameRef.current) return;
                         streamParseFrameRef.current = window.requestAnimationFrame(() => {
                             streamParseFrameRef.current = 0;
-                            if (!isCurrentGeneration()) return;
+                            if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                             const nameToId = new Map(groupCharacters.map(item => [item.name, item.id]));
                             const rawParts = parseGroupChatResponse(streamAccumRef.current, nameToId);
                             const parts = rawParts
@@ -3979,11 +3995,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                     onStreamDelta: (delta) => {
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
+                        if (!isChatRoomElementVisible(wrapperRef.current)) return;
                         // 预览更新合并到 rAF 下一帧：每帧最多一次全文净化+setState，避免高频增量卡顿
                         if (streamParseFrameRef.current) return;
                         streamParseFrameRef.current = window.requestAnimationFrame(() => {
                             streamParseFrameRef.current = 0;
-                            if (!isCurrentGeneration()) return;
+                            if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
                             setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                         });
                     },
@@ -4544,11 +4561,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 const onOfflineDelta = (delta: string) => {
                     if (!isCurrentOfflineRun()) return;
                     offlineStreamAccumRef.current += delta;
+                    if (!isChatRoomElementVisible(wrapperRef.current)) return;
                     // 线下预览解析合并到 rAF 下一帧：每帧最多一次全文解析+setState
                     if (offlineStreamFrameRef.current) return;
                     offlineStreamFrameRef.current = window.requestAnimationFrame(() => {
                         offlineStreamFrameRef.current = 0;
-                        if (!isCurrentOfflineRun()) return;
+                        if (!isCurrentOfflineRun() || !isChatRoomElementVisible(wrapperRef.current)) return;
                         // 与引擎顺序一致：先按预设 strip_texts 清洗原文，再解析（避免剔除文本影响 XML 结构时预览与最终结果不一致）
                         const previewRaw = stripLiteralTexts(offlineStreamAccumRef.current, streamPreviewTagConfig.stripTexts);
                         const parsed = parseOfflineResponse(previewRaw, streamPreviewTagConfig.summaryTag);
@@ -4694,11 +4712,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
             const onOfflineDelta = (delta: string) => {
                 if (!isCurrentOfflineRun()) return;
                 offlineStreamAccumRef.current += delta;
+                if (!isChatRoomElementVisible(wrapperRef.current)) return;
                 // 线下预览解析合并到 rAF 下一帧：每帧最多一次全文解析+setState（与首次发送路径对齐）
                 if (offlineStreamFrameRef.current) return;
                 offlineStreamFrameRef.current = window.requestAnimationFrame(() => {
                     offlineStreamFrameRef.current = 0;
-                    if (!isCurrentOfflineRun()) return;
+                    if (!isCurrentOfflineRun() || !isChatRoomElementVisible(wrapperRef.current)) return;
                     // 与引擎顺序一致：先按预设 strip_texts 清洗原文，再解析（避免剔除文本影响 XML 结构时预览与最终结果不一致）
                     const previewRaw = stripLiteralTexts(offlineStreamAccumRef.current, streamPreviewTagConfig.stripTexts);
                     const parsed = parseOfflineResponse(previewRaw, streamPreviewTagConfig.summaryTag);

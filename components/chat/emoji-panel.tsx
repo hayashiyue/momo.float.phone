@@ -135,10 +135,13 @@ interface StickerPanelProps {
     characterIds?: string[];
 }
 
+const STICKER_PAGE_BATCH = 35;
+
 export function StickerPanel({ onSend, characterId, characterIds }: StickerPanelProps) {
     const [stickerPacks, setStickerPacks] = useState<StickerPack[]>([]);
     const [activePackId, setActivePackId] = useState<string | null>(null);
     const [packUrlMap, setPackUrlMap] = useState<Record<string, string>>({});
+    const [visibleLimit, setVisibleLimit] = useState(STICKER_PAGE_BATCH);
 
     useEffect(() => {
         const ids = characterIds && characterIds.length > 0 ? characterIds : characterId ? [characterId] : [];
@@ -148,24 +151,29 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
             setPackUrlMap({});
             return;
         }
-        let cancelled = false;
         const packs = loadStickerPacksForCharacters(ids).filter(pack => pack.stickers.length > 0);
         setStickerPacks(packs);
         setActivePackId(prev => (prev && packs.some(pack => pack.id === prev) ? prev : packs[0]?.id ?? null));
-        Promise.all(packs.map(async pack => [pack.id, await resolvePackStickerMap(pack)] as const)).then(entries => {
-            if (cancelled) return;
-            const next: Record<string, string> = {};
-            for (const [packId, map] of entries) {
-                for (const [name, url] of Object.entries(map)) {
-                    next[`${packId}:${name}`] = url;
-                }
-            }
-            setPackUrlMap(next);
-        });
-        return () => { cancelled = true; };
     }, [characterId, characterIds]);
 
     const activePack = stickerPacks.find(pack => pack.id === activePackId) ?? stickerPacks[0] ?? null;
+
+    useEffect(() => {
+        setVisibleLimit(STICKER_PAGE_BATCH);
+        if (!activePack) return;
+        let cancelled = false;
+        resolvePackStickerMap(activePack).then(map => {
+            if (cancelled) return;
+            setPackUrlMap(prev => {
+                const next = { ...prev };
+                for (const [name, url] of Object.entries(map)) {
+                    next[`${activePack.id}:${name}`] = url;
+                }
+                return next;
+            });
+        });
+        return () => { cancelled = true; };
+    }, [activePack?.id]);
 
     return (
         <div className="h-[220px] flex flex-col">
@@ -189,7 +197,7 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
                         暂无表情包，请在角色设置里上传或绑定。
                     </div>
                 )}
-                {activePack?.stickers.map(sticker => {
+                {activePack?.stickers.slice(0, visibleLimit).map(sticker => {
                     const url = packUrlMap[`${activePack.id}:${sticker.name}`];
                     return (
                         <button
@@ -200,7 +208,7 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
                         >
                             <div className="w-9 h-9 flex items-center justify-center shrink-0">
                                 {url ? (
-                                    <img src={url} alt={sticker.name} className="w-9 h-9 object-contain" />
+                                    <img src={url} alt={sticker.name} loading="lazy" decoding="async" className="w-9 h-9 object-contain" />
                                 ) : (
                                     <span className="ts-9 text-[var(--c-text)] max-w-full truncate">{sticker.name}</span>
                                 )}
@@ -211,6 +219,15 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
                         </button>
                     );
                 })}
+                {activePack && activePack.stickers.length > visibleLimit && (
+                    <button
+                        type="button"
+                        onClick={() => setVisibleLimit(v => v + STICKER_PAGE_BATCH)}
+                        className="col-span-5 py-2 ts-12 text-[var(--c-text-muted)] bg-black/5 rounded-lg cursor-pointer border-none"
+                    >
+                        加载更多 ({visibleLimit}/{activePack.stickers.length})
+                    </button>
+                )}
             </div>
         </div>
     );

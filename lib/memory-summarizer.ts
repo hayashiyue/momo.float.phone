@@ -20,6 +20,7 @@ import { loadNativeTimeline, formatTimelineForSummarization, filterTimelineByAll
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
+import { hasActiveGenerationLock } from "./generation-lock";
 
 /** Per-character lock to prevent concurrent summarization. */
 const summarizingSet = new Set<string>();
@@ -33,6 +34,9 @@ export async function maybeRunSummarization(
     characterId: string,
     characterName: string
 ): Promise<void> {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if (hasActiveGenerationLock()) return;
+
     const config = loadMemoryConfig();
     if (!config.autoSummarizeEnabled) return;
 

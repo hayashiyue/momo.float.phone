@@ -6,7 +6,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { STICKER_PACKS } from "@/lib/sticker-data";
-import { loadStickerPacksForCharacters, resolvePackStickerMap } from "@/lib/custom-sticker-storage";
+import { loadStickerPacksForCharacters } from "@/lib/custom-sticker-storage";
+import { getThemeAssetMap } from "@/lib/theme-storage";
 
 export type StickerSearchItem = {
   key: string;
@@ -39,35 +40,21 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
     return () => window.clearTimeout(timer);
   }, [query]);
 
-  // ── 加载自定义贴纸（按会话角色绑定的包），解析出 name → url ──
-  const [customItems, setCustomItems] = useState<StickerSearchItem[]>([]);
-  const loadSeqRef = useRef(0);
-  useEffect(() => {
-    const seq = ++loadSeqRef.current;
-    let cancelled = false;
-    (async () => {
-      const packs = loadStickerPacksForCharacters(characterIds).filter((pack) => pack.stickers.length > 0);
-      const urlByName: Record<string, string> = {};
-      for (const pack of packs) {
-        const map = await resolvePackStickerMap(pack);
-        for (const [name, url] of Object.entries(map)) {
-          if (url) urlByName[name] = url;
-        }
+  // ── 仅在匹配出前 12 条结果后，才按需读取对应贴纸的 IndexedDB 资源，严禁在打字时全量读取整个 GIF 图集 ──
+  const customMetaItems = useMemo(() => {
+    const packs = loadStickerPacksForCharacters(characterIds).filter((pack) => pack.stickers.length > 0);
+    const items: Array<StickerSearchItem & { assetId?: string }> = [];
+    for (const pack of packs) {
+      for (const sticker of pack.stickers) {
+        items.push({
+          key: `custom:${pack.id}:${sticker.id}`,
+          name: sticker.name,
+          url: sticker.externalUrl,
+          assetId: sticker.assetId,
+        });
       }
-      if (cancelled) return;
-      const items: StickerSearchItem[] = [];
-      for (const pack of packs) {
-        for (const sticker of pack.stickers) {
-          items.push({ key: `custom:${pack.id}:${sticker.id}`, name: sticker.name, url: urlByName[sticker.name] });
-        }
-      }
-      setCustomItems(items);
-    })();
-    return () => {
-      cancelled = true;
-      // 只清理最后一次加载，避免竞态时旧结果覆盖新结果
-      if (loadSeqRef.current === seq) setCustomItems([]);
-    };
+    }
+    return items;
   }, [characterIds]);
 
   // ── 内置表情包（emoji 兜底） ──
@@ -80,7 +67,7 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
   );
 
   // ── 模糊匹配 + 排序（前缀优先，再包含；同名去重，自定义优先） ──
-  const results = useMemo(() => {
+  const matchedCandidates = useMemo(() => {
     const q = debouncedQuery.toLowerCase();
     if (!q) return [];
     const rank = (name: string): number => {
@@ -90,12 +77,12 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
       if (n.includes(q)) return 2;
       return -1;
     };
-    const scored = [...customItems, ...builtinItems]
+    const scored = [...customMetaItems, ...builtinItems]
       .map((item) => ({ item, rank: rank(item.name) }))
       .filter((entry) => entry.rank >= 0)
       .sort((a, b) => a.rank - b.rank || a.item.name.length - b.item.name.length);
     const seen = new Set<string>();
-    const out: StickerSearchItem[] = [];
+    const out: Array<StickerSearchItem & { assetId?: string }> = [];
     for (const { item } of scored) {
       if (seen.has(item.name)) continue;
       seen.add(item.name);
@@ -103,7 +90,28 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
       if (out.length >= MAX_RESULTS) break;
     }
     return out;
-  }, [debouncedQuery, builtinItems, customItems]);
+  }, [debouncedQuery, builtinItems, customMetaItems]);
+
+  const [resolvedAssetMap, setResolvedAssetMap] = useState<Record<string, string>>({});
+  useEffect(() => {
+    const assetIds = Array.from(new Set(matchedCandidates.map(i => i.assetId).filter((id): id is string => Boolean(id && !resolvedAssetMap[id]))));
+    if (assetIds.length === 0) return;
+    let cancelled = false;
+    getThemeAssetMap(assetIds).then(map => {
+      if (cancelled) return;
+      setResolvedAssetMap(prev => ({ ...prev, ...map }));
+    });
+    return () => { cancelled = true; };
+  }, [matchedCandidates]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const results = useMemo<StickerSearchItem[]>(() => {
+    return matchedCandidates.map(item => ({
+      key: item.key,
+      name: item.name,
+      emoji: item.emoji,
+      url: item.url || (item.assetId ? resolvedAssetMap[item.assetId] : undefined),
+    }));
+  }, [matchedCandidates, resolvedAssetMap]);
 
   if (!debouncedQuery || results.length === 0) return null;
 
@@ -139,7 +147,7 @@ export function StickerSearchSuggest({ query, characterIds, onSend, onClose }: S
           >
             <span className="w-14 h-14 flex items-center justify-center overflow-hidden">
               {item.url ? (
-                <img src={item.url} alt={item.name} className="w-14 h-14 object-contain" draggable={false} />
+                <img src={item.url} alt={item.name} loading="lazy" decoding="async" className="w-14 h-14 object-contain" draggable={false} />
               ) : item.emoji ? (
                 <span className="text-[32px] leading-none">{item.emoji}</span>
               ) : (

@@ -212,7 +212,9 @@ export function MixologyGame({ sessionId, onBack, onToast }: GameProps) {
      * 回溯把后面的轮次砍掉时，收起的那些不会因此从顶上冒出来把画面往下推——
      * 用户正停在被回溯的那一轮上，iOS 没有 scroll anchoring，顶上一长就跳走了。
      */
-    const [hiddenTurnCount, setHiddenTurnCount] = useState(0);
+    const [hiddenTurnCount, setHiddenTurnCount] = useState(() =>
+        Math.max(0, (session?.turns.length ?? 0) - MIX_INITIAL_TURNS)
+    );
     /**
      * 展开更早的轮次后，把原来最上面那条钉在屏幕上原来的位置：新插进来的轮次里
      * 小票/小剧场 iframe 是异步报高的，头一两秒内容会连着长高几次，每次报高都按锚点重落一次，
