@@ -36,9 +36,11 @@ export function bgSetInterval(callback: () => void, ms: number): () => void {
     const id = `bgi_${++idCounter}`;
 
     if (w) {
+        intervalIds.add(id);
         callbacks.set(id, callback);
         w.postMessage({ type: "start-interval", id, ms });
         return () => {
+            intervalIds.delete(id);
             callbacks.delete(id);
             w.postMessage({ type: "stop", id });
         };
