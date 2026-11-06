@@ -1935,6 +1935,8 @@ export async function buildChatPromptMessages(
         excludeOfflineSessionId: options?.excludeOfflineSessionId,
         excludeChatSessionId: isOfflineMode ? undefined : session.id,
         promptTimestampOptions,
+        maxMessagesPerSession: memConfig.shortTermTokenBudget > 0 ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4))) : 800,
+        allowedSources: memConfig.shortTermAllowedSources,
     });
     const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
         timeline,

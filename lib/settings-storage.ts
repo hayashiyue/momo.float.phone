@@ -1292,12 +1292,23 @@ export function saveChatSendConfig(config: ChatSendConfig): void {
 
 // --- User Identities ──────────────────────────────────────────
 
+let _userIdentitiesMemoRaw: string | null | undefined = undefined;
+let _userIdentitiesMemoResult: UserIdentity[] = [];
+
 export function loadUserIdentities(): UserIdentity[] {
     if (typeof window === "undefined") return [];
     try {
         const raw = kvGet(USER_IDENTITIES_KEY);
-        if (!raw) return [];
-        return JSON.parse(raw) as UserIdentity[];
+        if (raw === _userIdentitiesMemoRaw) return _userIdentitiesMemoResult;
+        if (!raw) {
+            _userIdentitiesMemoRaw = raw;
+            _userIdentitiesMemoResult = [];
+            return _userIdentitiesMemoResult;
+        }
+        const parsed = JSON.parse(raw) as UserIdentity[];
+        _userIdentitiesMemoRaw = raw;
+        _userIdentitiesMemoResult = Array.isArray(parsed) ? parsed : [];
+        return _userIdentitiesMemoResult;
     } catch {
         return [];
     }
@@ -1305,7 +1316,10 @@ export function loadUserIdentities(): UserIdentity[] {
 
 export function saveUserIdentities(identities: UserIdentity[]): void {
     if (typeof window === "undefined") return;
-    kvSet(USER_IDENTITIES_KEY, JSON.stringify(identities));
+    const serialized = JSON.stringify(identities);
+    _userIdentitiesMemoRaw = serialized;
+    _userIdentitiesMemoResult = identities;
+    kvSet(USER_IDENTITIES_KEY, serialized);
     window.dispatchEvent(new CustomEvent(USER_IDENTITIES_UPDATED_EVENT));
 }
 

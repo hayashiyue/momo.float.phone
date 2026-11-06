@@ -395,6 +395,7 @@ function pollSchedules() {
                 if (remainSec % 10 === 0) console.log(`[FollowUp] Waiting: session=${sched.sessionId}, ${remainSec}s remaining`);
                 continue;
             }
+            if (now < scheduledOutboxGraceUntil) continue;
             if (firingSet.has(sched.sessionId)) continue; // already in-flight
             console.log(`[FollowUp] Firing now for session=${sched.sessionId}, count=${sched.count}`);
             fireFollowUp(sched); // intentionally not awaited — fire & forget
@@ -455,7 +456,7 @@ function pollMenstrualPeriodCare(now: number) {
     }
 }
 
-async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?: number }) {
+async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?: number; fireAt?: number }) {
     if (sched.count >= MAX_FOLLOW_UPS) {
         clearFollowUpSchedule(sched.sessionId);
         return;
@@ -541,7 +542,17 @@ async function fireFollowUp(sched: { sessionId: string; count: number; delaySec?
             return;
         }
 
-        const { hasVisible, newCount, stateValues } = await saveBackgroundCompletionRounds(rounds, session.id, sched.count, count, latestMessages);
+        const scheduledCreatedAt = sched.fireAt && sched.fireAt <= Date.now()
+            ? new Date(sched.fireAt).toISOString()
+            : undefined;
+        const { hasVisible, newCount, stateValues } = await saveBackgroundCompletionRounds(
+            rounds,
+            session.id,
+            sched.count,
+            count,
+            latestMessages,
+            scheduledCreatedAt ? { createdAt: scheduledCreatedAt } : undefined,
+        );
         console.log(`[FollowUp] Result: hasVisible=${hasVisible}, newCount=${newCount}`);
 
         // 本地已完成这一轮，撤销服务端对应的兜底预约（只撤本轮的精确键，
@@ -611,11 +622,11 @@ function pollIdleReconnect(now: number) {
         if (isWithinPushQuietHours(now)) continue; // 安静时段本地也不打扰，出时段后自然触发
 
         console.log(`[IdleReconnect] Firing for session=${rule.sessionId}, idle=${Math.round((now - lastUserAt) / 60000)}min`);
-        void fireIdleReconnect(rule, lastUserAt);
+        void fireIdleReconnect(rule, lastUserAt, nextDueAt);
     }
 }
 
-async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
+async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number, scheduledDueAt?: number) {
     idleReconnectFiringSet.add(rule.id);
     let backgroundController: AbortController | null = null;
     try {
@@ -650,12 +661,16 @@ async function fireIdleReconnect(rule: IdleReconnectRule, lastUserAt: number) {
             return;
         }
 
+        const scheduledCreatedAt = scheduledDueAt && scheduledDueAt <= Date.now()
+            ? new Date(scheduledDueAt).toISOString()
+            : undefined;
         const { hasVisible, stateValues } = await saveBackgroundCompletionRounds(
             rounds,
             session.id,
             0,
             undefined,
             latestMessages,
+            scheduledCreatedAt ? { createdAt: scheduledCreatedAt } : undefined,
         );
         markIdleReconnectFired(rule.id, Date.now());
         if (hasVisible) scheduleFollowUp(session.id, 0, stateValues);
@@ -717,12 +732,16 @@ async function fireTimedWake(sched: TimedWakeSchedule) {
             return;
         }
 
+        const scheduledCreatedAt = sched.fireAt && sched.fireAt <= Date.now()
+            ? new Date(sched.fireAt).toISOString()
+            : undefined;
         const { hasVisible, stateValues } = await saveBackgroundCompletionRounds(
             rounds,
             session.id,
             0,
             undefined,
             latestMessages,
+            scheduledCreatedAt ? { createdAt: scheduledCreatedAt } : undefined,
         );
         console.log(`[TimedWake] Result: hasVisible=${hasVisible}`);
 
