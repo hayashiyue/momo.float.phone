@@ -3797,6 +3797,9 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         streamAccumRef.current = "";
         setStreamPreview(null);
         try {
+            // 先让输入区与生成状态完成绘制，再开始本地上下文装配（与 runManagedGeneration 保持一致）。
+            await new Promise<void>(resolve => requestAnimationFrame(() => { setTimeout(resolve, 0); }));
+            if (!isCurrentGeneration()) return;
             let latestMessages = loadChatMessages(session.id);
             const latestSession = loadChatSessions().find((item) => item.id === session.id);
             if (!session.isGroup && latestSession?.allowForcedOfflineStory === true) {

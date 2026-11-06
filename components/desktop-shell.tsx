@@ -1985,22 +1985,22 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     };
   }, [desktopReady]);
 
-  const loadedThemeAssetIdsRef = useRef<Set<string>>(new Set(Object.keys(initialThemeAssets ?? {})));
+  const initialThemeFetchSkippedRef = useRef(false);
 
   useEffect(() => {
     const allIds = collectThemeAssetIds(draftTheme);
-    const missingIds = allIds.filter((id) => !loadedThemeAssetIdsRef.current.has(id));
-    if (missingIds.length === 0) {
+    const ids = !initialThemeFetchSkippedRef.current && initialThemeAssets
+      ? allIds.filter((id) => !initialThemeAssets[id])
+      : allIds;
+    initialThemeFetchSkippedRef.current = true;
+    if (ids.length === 0) {
       return;
     }
 
     let disposed = false;
-    void getThemeAssetMap(missingIds).then((map) => {
+    void getThemeAssetMap(ids).then((map) => {
       if (disposed) {
         return;
-      }
-      for (const id of Object.keys(map)) {
-        loadedThemeAssetIdsRef.current.add(id);
       }
       setThemeAssets((previous) => ({ ...previous, ...map }));
     });
