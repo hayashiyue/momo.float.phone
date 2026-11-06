@@ -517,16 +517,23 @@ function resolvePendingAvatarRecommendation(message: ChatMessage): void {
 
     const session = _sessionsCache.find(item => item.id === message.sessionId);
     if (!session || session.isGroup) return;
-    const legacyRecommendation = [..._messagesCache].reverse().find(item =>
-        item.sessionId === message.sessionId
-        && item.role === "user"
-        && item.mediaType === "image"
-        && item.mediaData?.avatarRecommendationForCharacterId === session.contactId
-        && item.mediaData?.avatarRecommendationStatus === "pending"
-        && Boolean(item.mediaUrl),
-    );
+    const sessionMsgs = getSortedSessionMessages(message.sessionId);
+    let legacyRecommendation: ChatMessage | undefined;
+    for (let i = sessionMsgs.length - 1; i >= 0 && i >= sessionMsgs.length - 48; i -= 1) {
+        const item = sessionMsgs[i];
+        if (
+            item.role === "user"
+            && item.mediaType === "image"
+            && item.mediaData?.avatarRecommendationForCharacterId === session.contactId
+            && item.mediaData?.avatarRecommendationStatus === "pending"
+            && Boolean(item.mediaUrl)
+        ) {
+            legacyRecommendation = item;
+            break;
+        }
+    }
     const recommendation = legacyRecommendation
-        || findUserAvatarChangeIntent(_messagesCache, message.sessionId, session.contactId)?.image;
+        || findUserAvatarChangeIntent(sessionMsgs, message.sessionId, session.contactId)?.image;
     if (!recommendation) return;
 
     const explicitAccepted = AVATAR_ACCEPT_RE.test(message.rawResponseText);
@@ -768,12 +775,48 @@ export function compareChatMessages(a: ChatMessage, b: ChatMessage): number {
 let indexedMessages: ChatMessage[] | undefined;
 let indexedMessageCount = -1;
 const messagePositionsBySession = new Map<string, number[]>();
+const _sortedSessionCache = new Map<string, ChatMessage[]>();
+
+function invalidateSessionMemo(sessionId?: string): void {
+    if (sessionId) {
+        _sortedSessionCache.delete(sessionId);
+    } else {
+        _sortedSessionCache.clear();
+    }
+}
+
+function appendToSessionBucket(msg: ChatMessage): void {
+    const cached = _sortedSessionCache.get(msg.sessionId);
+    if (!cached) return;
+    if (cached.length === 0 || compareChatMessages(cached[cached.length - 1], msg) <= 0) {
+        _sortedSessionCache.set(msg.sessionId, [...cached, msg]);
+    } else {
+        _sortedSessionCache.delete(msg.sessionId);
+    }
+}
+
+function replaceInSessionBucket(updated: ChatMessage): void {
+    const cached = _sortedSessionCache.get(updated.sessionId);
+    if (!cached) return;
+    for (let i = cached.length - 1; i >= 0; i -= 1) {
+        if (cached[i].id === updated.id) {
+            if (cached[i].order === updated.order && cached[i].createdAt === updated.createdAt) {
+                const next = [...cached];
+                next[i] = updated;
+                _sortedSessionCache.set(updated.sessionId, next);
+            } else {
+                _sortedSessionCache.delete(updated.sessionId);
+            }
+            return;
+        }
+    }
+}
 
 function getSortedSessionMessages(sessionId: string): ChatMessage[] {
     const messages = _loadAllMessages();
-    // 缓存位置而非消息对象：编辑/撤回替换原对象时仍会读到最新内容。
     if (indexedMessages !== messages || indexedMessageCount !== messages.length) {
         messagePositionsBySession.clear();
+        _sortedSessionCache.clear();
         messages.forEach((message, index) => {
             const positions = messagePositionsBySession.get(message.sessionId) || [];
             positions.push(index);
@@ -782,7 +825,11 @@ function getSortedSessionMessages(sessionId: string): ChatMessage[] {
         indexedMessages = messages;
         indexedMessageCount = messages.length;
     }
-    return (messagePositionsBySession.get(sessionId) || []).map(index => messages[index]).sort(compareChatMessages);
+    const cached = _sortedSessionCache.get(sessionId);
+    if (cached) return cached;
+    const sorted = (messagePositionsBySession.get(sessionId) || []).map(index => messages[index]).sort(compareChatMessages);
+    _sortedSessionCache.set(sessionId, sorted);
+    return sorted;
 }
 
 function getNextMessageOrder(sessionId: string): number {
@@ -1517,6 +1564,15 @@ export function pushChatMessage(msg: Omit<ChatMessage, "id" | "createdAt" | "sta
     }
 
     _messagesCache.push(newMsg);
+    if (indexedMessages === _messagesCache && indexedMessageCount === _messagesCache.length - 1) {
+        const positions = messagePositionsBySession.get(newMsg.sessionId) || [];
+        positions.push(_messagesCache.length - 1);
+        messagePositionsBySession.set(newMsg.sessionId, positions);
+        indexedMessageCount = _messagesCache.length;
+        appendToSessionBucket(newMsg);
+    } else {
+        invalidateSessionMemo(newMsg.sessionId);
+    }
     rememberMessageOrder(newMsg);
     dbPutMessage(newMsg);
     resolvePendingAvatarRecommendation(newMsg);
@@ -1578,6 +1634,15 @@ export function upsertImportedChatMessage(msg: ChatMessage): { message: ChatMess
     };
 
     _messagesCache.push(newMsg);
+    if (indexedMessages === _messagesCache && indexedMessageCount === _messagesCache.length - 1) {
+        const positions = messagePositionsBySession.get(newMsg.sessionId) || [];
+        positions.push(_messagesCache.length - 1);
+        messagePositionsBySession.set(newMsg.sessionId, positions);
+        indexedMessageCount = _messagesCache.length;
+        appendToSessionBucket(newMsg);
+    } else {
+        invalidateSessionMemo(newMsg.sessionId);
+    }
     rememberMessageOrder(newMsg);
     dbPutMessage(newMsg);
 
@@ -1977,6 +2042,7 @@ export function editChatMessage(messageId: string, newContent: string) {
     const msgIdx = _messagesCache.findIndex(m => m.id === messageId);
     if (msgIdx !== -1) {
         _messagesCache[msgIdx] = { ..._messagesCache[msgIdx], content: newContent };
+        replaceInSessionBucket(_messagesCache[msgIdx]);
         dbPutMessage(_messagesCache[msgIdx]);
 
         const sessionId = _messagesCache[msgIdx].sessionId;
@@ -1995,6 +2061,7 @@ export function retractChatMessage(messageId: string) {
     const msgIdx = _messagesCache.findIndex(m => m.id === messageId);
     if (msgIdx !== -1) {
         _messagesCache[msgIdx] = { ..._messagesCache[msgIdx], isRetracted: true };
+        replaceInSessionBucket(_messagesCache[msgIdx]);
         dbPutMessage(_messagesCache[msgIdx]);
 
         const sessionId = _messagesCache[msgIdx].sessionId;
@@ -2187,6 +2254,7 @@ export function updateMessageMediaStatus(messageId: string, newStatus: "pending"
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaData: { ..._messagesCache[idx].mediaData, status: newStatus } };
+        replaceInSessionBucket(_messagesCache[idx]);
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2196,6 +2264,7 @@ export function updateMessageMediaData(messageId: string, data: ChatMessage["med
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaData: data };
+        replaceInSessionBucket(_messagesCache[idx]);
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2204,6 +2273,7 @@ export function updateMessageMediaUrl(messageId: string, mediaUrl: string) {
     const idx = _messagesCache.findIndex(m => m.id === messageId);
     if (idx !== -1) {
         _messagesCache[idx] = { ..._messagesCache[idx], mediaUrl };
+        replaceInSessionBucket(_messagesCache[idx]);
         dbPutMessage(_messagesCache[idx]);
     }
 }
@@ -2226,6 +2296,7 @@ export async function persistMessageVoiceAudio(
             mediaData: { ..._messagesCache[idx].mediaData, synthesizedFromText },
         };
         _messagesCache[idx] = next;
+        replaceInSessionBucket(next);
         dbPutMessage(next);
         return;
     }
@@ -2252,6 +2323,7 @@ export function updateChatMessage(
 
     _messagesCache[idx] = { ..._messagesCache[idx], ...patch };
     const updated = _messagesCache[idx];
+    replaceInSessionBucket(updated);
     dbPutMessage(updated);
 
     const sessions = loadChatSessions();
@@ -2363,6 +2435,7 @@ export function replaceMessageWithParts(
 
     // Remove original
     _messagesCache.splice(idx, 1);
+    invalidateSessionMemo(original.sessionId);
     dbDeleteMessage(originalId);
 
     // Insert parsed parts at the same position, preserving timestamp
@@ -2647,17 +2720,27 @@ export function getLatestCharacterStateValues(
     options?: { before?: Pick<ChatMessage, "createdAt" | "id"> },
 ): StateValue[] {
     if (!characterId) return [];
-    const sessionsById = new Map(loadChatSessions().map(session => [session.id, session]));
-    const candidates = _loadAllMessages()
-        .filter(msg => {
-            if (!isBeforeStateCutoff(msg, options?.before)) return false;
-            return getStateOwnerCharacterId(msg, sessionsById) === characterId;
-        })
-        .sort((a, b) => {
-            const timeDiff = getMessageTimeValue(b) - getMessageTimeValue(a);
-            if (timeDiff !== 0) return timeDiff;
-            return b.id.localeCompare(a.id);
-        });
-
-    return candidates[0]?.stateValues || [];
+    const sessions = loadChatSessions().filter(s =>
+        (!s.isGroup && s.contactId === characterId)
+        || (s.isGroup && s.participantIds?.includes(characterId))
+    );
+    let bestMsg: ChatMessage | null = null;
+    let bestTime = -Infinity;
+    for (const s of sessions) {
+        const msgs = getSortedSessionMessages(s.id);
+        for (let i = msgs.length - 1; i >= 0; i -= 1) {
+            const msg = msgs[i];
+            if (!msg.stateValues || msg.stateValues.length === 0) continue;
+            if (s.isGroup && msg.senderCharacterId !== characterId) continue;
+            if (!s.isGroup && msg.senderCharacterId && msg.senderCharacterId !== characterId) continue;
+            if (!isBeforeStateCutoff(msg, options?.before)) continue;
+            const t = getMessageTimeValue(msg);
+            if (!bestMsg || t > bestTime || (t === bestTime && msg.id.localeCompare(bestMsg.id) > 0)) {
+                bestMsg = msg;
+                bestTime = t;
+            }
+            break;
+        }
+    }
+    return bestMsg?.stateValues || [];
 }

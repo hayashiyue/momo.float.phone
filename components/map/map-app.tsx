@@ -1,12 +1,16 @@
 "use client";
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import MapLobby from "./map-lobby";
 import MapView from "./map-view";
+import { hydrateThemeBlobs } from "@/lib/map-storage";
 import type { MapWorld, GameSave } from "@/lib/map-types";
 
 type View = "lobby" | "playing";
 
 export default function MapApp({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    void hydrateThemeBlobs();
+  }, []);
   const [view, setView] = useState<View>("lobby");
   const [activeWorld, setActiveWorld] = useState<MapWorld | null>(null);
   const [activeSave, setActiveSave] = useState<GameSave | null>(null);

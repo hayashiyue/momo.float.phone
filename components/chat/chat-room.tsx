@@ -5641,6 +5641,32 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         return id;
     }, []);
 
+    const projectedMessageRenderMeta = useMemo(() => {
+        const displayContents = new Array<string>(projectedMessages.length);
+        const hiddenFlags = new Array<boolean>(projectedMessages.length);
+        const prevVisibleMessages = new Array<RenderChatMessage | null>(projectedMessages.length);
+        let lastVisible: RenderChatMessage | null = null;
+
+        for (let i = 0; i < projectedMessages.length; i += 1) {
+            prevVisibleMessages[i] = lastVisible;
+            if (voiceCallGroups.memberSet.has(i)) {
+                displayContents[i] = "";
+                hiddenFlags[i] = true;
+                continue;
+            }
+            const msg = projectedMessages[i];
+            const content = getMessageDisplayContent(msg);
+            const hidden = isHiddenChatFlowMessage(msg, content);
+            displayContents[i] = content;
+            hiddenFlags[i] = hidden;
+            if (!hidden) {
+                lastVisible = msg;
+            }
+        }
+
+        return { displayContents, hiddenFlags, prevVisibleMessages };
+    }, [getMessageDisplayContent, projectedMessages, voiceCallGroups.memberSet]);
+
     const visibleSelectableMessageIds = useMemo(() => {
         const ids: string[] = [];
         const seen = new Set<string>();
@@ -5648,13 +5674,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
             if (voiceCallGroups.memberSet.has(idx)) return;
             const storedId = getSelectableStoredMessageId(msg);
             if (!storedId || seen.has(storedId)) return;
-            const displayContent = getMessageDisplayContent(msg);
-            if (isHiddenChatFlowMessage(msg, displayContent)) return;
+            if (projectedMessageRenderMeta.hiddenFlags[idx]) return;
             seen.add(storedId);
             ids.push(storedId);
         });
         return ids;
-    }, [getMessageDisplayContent, getSelectableStoredMessageId, projectedMessages, voiceCallGroups.memberSet]);
+    }, [getSelectableStoredMessageId, projectedMessageRenderMeta.hiddenFlags, projectedMessages, voiceCallGroups.memberSet]);
 
     const multiDeleteTargetIds = useMemo(() => {
         if (selectedMessageIds.size === 0) return [];
@@ -6206,23 +6231,15 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                     const renderMsg = msg;
                     const isSystemInstruction = isSystemInstructionMessage(renderMsg);
                     const isCompactSystemInstruction = isSystemInstruction && renderMsg.mediaData?.compactSystemInstruction === true;
-                    const bubbleDisplayContent = getMessageDisplayContent(renderMsg);
-                    let prevVisibleMsg: RenderChatMessage | null = null;
-                    for (let prevIdx = idx - 1; prevIdx >= 0; prevIdx -= 1) {
-                        if (voiceCallGroups.memberSet.has(prevIdx)) continue;
-                        const candidate = projectedMessages[prevIdx];
-                        const candidateDisplayContent = getMessageDisplayContent(candidate);
-                        if (isHiddenChatFlowMessage(candidate, candidateDisplayContent)) continue;
-                        prevVisibleMsg = candidate;
-                        break;
-                    }
+                    const bubbleDisplayContent = projectedMessageRenderMeta.displayContents[idx] ?? getMessageDisplayContent(renderMsg);
+                    const prevVisibleMsg = projectedMessageRenderMeta.prevVisibleMessages[idx] ?? null;
                     const showTime = shouldShowTimestamp(msg.createdAt, prevVisibleMsg?.createdAt ?? null);
                     const isConsecutive = prevVisibleMsg && !showTime && uiRole(prevVisibleMsg) === uiRole(msg) && uiRole(msg) !== "system"
                         && (!session.isGroup || prevVisibleMsg.senderCharacterId === msg.senderCharacterId);
                     // Hide bubbles with no visible content (empty text, stripped music tags, etc.)
                     const visibleContent = getChatFlowVisibleContent(renderMsg, bubbleDisplayContent);
                     const isVisualMedia = isChatVisualMedia(renderMsg);
-                    const hiddenEmpty = isHiddenChatFlowMessage(renderMsg, bubbleDisplayContent);
+                    const hiddenEmpty = projectedMessageRenderMeta.hiddenFlags[idx] ?? isHiddenChatFlowMessage(renderMsg, bubbleDisplayContent);
                     const hasFoldedPanel = !!(renderMsg.statusPanel || renderMsg.innerMonologue);
                     // 内心卡片只展示本轮实际输出的状态值；旧数据没有 freshStateValues 时回退到合并快照
                     const cardStateValues = msg.freshStateValues ?? msg.stateValues;

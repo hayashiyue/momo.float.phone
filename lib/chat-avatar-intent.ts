@@ -59,7 +59,8 @@ export function findUserAvatarChangeIntent(
     sessionId: string,
     characterId?: string,
 ): { image: ChatMessage; intentText: string } | null {
-    const sessionMessages = history.filter(message => message.sessionId === sessionId);
+    const tailWindow = history.length > 48 ? history.slice(-48) : history;
+    const sessionMessages = tailWindow.filter(message => message.sessionId === sessionId);
     if (sessionMessages.length === 0) return null;
 
     // resolvePendingAvatarRecommendation 在角色消息已经入缓存后调用。跳过同一回复批次
