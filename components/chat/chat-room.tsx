@@ -1852,7 +1852,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 .filter(m => m.mediaType === "sticker" && m.mediaData?.label)
                 .map(m => m.mediaData!.label!)
         );
-        Promise.all(charIds.map(id => prewarmStickerCache(id, usedStickerNames))).then(() => {
+        Promise.all(charIds.map(id => prewarmStickerCache(id, usedStickerNames))).catch(() => {}).then(() => {
             setStickerReady(true);
             needsInitialScrollRef.current = true;
             prevMsgCountRef.current = 0;

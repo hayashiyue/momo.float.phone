@@ -1614,36 +1614,48 @@ function PokeBubble({ msg, charName, userName }: { msg: ChatMessage; charName?: 
 
 // ── Sticker ─────────────────────────────
 
-// In-memory cache: assetId/name → resolved URL (survives re-renders, cleared on page reload)
+// In-memory cache: assetId/name → resolved URL (bounded to 80 entries to avoid base64 OOM)
 const _stickerUrlCache = new Map<string, string>();
+function putStickerCache(key: string, url: string): void {
+    if (_stickerUrlCache.size >= 80 && !_stickerUrlCache.has(key)) {
+        const oldest = _stickerUrlCache.keys().next().value;
+        if (oldest !== undefined) _stickerUrlCache.delete(oldest);
+    }
+    _stickerUrlCache.set(key, url);
+}
 
 /** Pre-populate sticker cache only for stickers actually used in the visible message window (single-transaction batch read). */
 export async function prewarmStickerCache(characterId: string, onlyNames?: Set<string>): Promise<void> {
     if (onlyNames && onlyNames.size === 0) return;
     if (onlyNames) {
-        const [{ loadCustomStickers }, { getThemeAssetMap }] = await Promise.all([
+        const [{ loadCustomStickers, findCustomStickerByName: findSticker }, { getThemeAssetMap }] = await Promise.all([
             import("@/lib/custom-sticker-storage"),
             import("@/lib/theme-storage"),
         ]);
         const stickers = loadCustomStickers(characterId);
         const byName = new Map(stickers.map(s => [s.name, s]));
-        const pendingAssets: Array<{ cacheKey: string; assetId: string }> = [];
+        const pendingAssets: Array<{ cacheKey: string; nameKey: string; assetId: string }> = [];
         for (const name of onlyNames) {
             const cacheKey = `${characterId}:${name}`;
+            const nameKey = `:${name}`;
             if (_stickerUrlCache.has(cacheKey)) continue;
-            const sticker = byName.get(name);
+            const sticker = byName.get(name) ?? findSticker(characterId, name);
             if (!sticker) continue;
             if (sticker.externalUrl) {
-                _stickerUrlCache.set(cacheKey, sticker.externalUrl);
+                putStickerCache(cacheKey, sticker.externalUrl);
+                putStickerCache(nameKey, sticker.externalUrl);
             } else if (sticker.assetId) {
-                pendingAssets.push({ cacheKey, assetId: sticker.assetId });
+                pendingAssets.push({ cacheKey, nameKey, assetId: sticker.assetId });
             }
         }
         if (pendingAssets.length > 0) {
             const assetMap = await getThemeAssetMap(pendingAssets.map(p => p.assetId));
-            for (const { cacheKey, assetId } of pendingAssets) {
+            for (const { cacheKey, nameKey, assetId } of pendingAssets) {
                 const url = assetMap[assetId];
-                if (url) _stickerUrlCache.set(cacheKey, url);
+                if (url) {
+                    putStickerCache(cacheKey, url);
+                    putStickerCache(nameKey, url);
+                }
             }
         }
         return;
@@ -1651,7 +1663,8 @@ export async function prewarmStickerCache(characterId: string, onlyNames?: Set<s
     const { resolveCustomStickerMap } = await import("@/lib/custom-sticker-storage");
     const map = await resolveCustomStickerMap(characterId);
     for (const [name, url] of Object.entries(map)) {
-        _stickerUrlCache.set(`${characterId}:${name}`, url);
+        putStickerCache(`${characterId}:${name}`, url);
+        putStickerCache(`:${name}`, url);
     }
 }
 
@@ -1659,9 +1672,10 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
     const d = msg.mediaData;
     const label = d?.label || "";
 
-    // Check pre-resolved URL or memory cache first
+    // Check pre-resolved URL or memory cache first (fallback to global name key for group/user messages)
     const cacheKey = `${characterId || ""}:${label}`;
-    const cachedUrl = d?.stickerUrl || _stickerUrlCache.get(cacheKey);
+    const nameKey = `:${label}`;
+    const cachedUrl = d?.stickerUrl || _stickerUrlCache.get(cacheKey) || _stickerUrlCache.get(nameKey);
     const [resolvedUrl, setResolvedUrl] = useState<string | null>(cachedUrl || null);
 
     useEffect(() => {
@@ -1669,16 +1683,17 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
             setResolvedUrl(d.stickerUrl);
             return;
         }
-        if (!label || !characterId) return;
-        const cached = _stickerUrlCache.get(cacheKey);
+        if (!label) return;
+        const cached = _stickerUrlCache.get(cacheKey) || _stickerUrlCache.get(nameKey);
         if (cached) {
             setResolvedUrl(cached);
             return;
         }
-        const custom = findCustomStickerByName(characterId, label);
+        const custom = findCustomStickerByName(characterId || "", label);
         if (!custom) return;
         if (custom.externalUrl) {
-            _stickerUrlCache.set(cacheKey, custom.externalUrl);
+            putStickerCache(cacheKey, custom.externalUrl);
+            putStickerCache(nameKey, custom.externalUrl);
             setResolvedUrl(custom.externalUrl);
             return;
         }
@@ -1686,12 +1701,13 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
         let cancelled = false;
         resolveCustomStickerUrl(custom.assetId).then(url => {
             if (!cancelled && url) {
-                _stickerUrlCache.set(cacheKey, url);
+                putStickerCache(cacheKey, url);
+                putStickerCache(nameKey, url);
                 setResolvedUrl(url);
             }
-        });
+        }).catch(() => {});
         return () => { cancelled = true; };
-    }, [cacheKey, label, characterId, d?.stickerUrl]);
+    }, [cacheKey, nameKey, label, characterId, d?.stickerUrl]);
 
     const imgUrl = d?.stickerUrl || cachedUrl || resolvedUrl;
     if (imgUrl) {

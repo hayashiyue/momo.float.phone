@@ -2,6 +2,7 @@ import { callQaAgent, compactQaContext, formatQaErrorMessage, type QaContextEntr
 import { QA_TOOLS, formatQaToolSubtitle, type QaCreatedContent, type QaProposedCommit } from "./qa-agent-tools";
 import { loadQaGithubConfig } from "./qa-github";
 import { commitQaFiles, revertQaCommit, type QaCommitResult } from "./qa-github-write";
+import { openIndexedDbAtLeast } from "./idb-open";
 
 // ── 答疑 App 会话存储 ─────────────────────────────────
 // 模式与 mascot-chat-store 一致：裸 IndexedDB + 模块级单例 + subscribe/snapshot。
@@ -259,33 +260,22 @@ let _qaDbPromise: Promise<IDBDatabase | null> | null = null;
 function getQaDb(): Promise<IDBDatabase | null> {
     if (typeof indexedDB === "undefined") return Promise.resolve(null);
     if (_qaDbPromise) return _qaDbPromise;
-    _qaDbPromise = new Promise<IDBDatabase | null>((resolve) => {
-        try {
-            const request = indexedDB.open(QA_DB_NAME, QA_DB_VERSION);
-            request.onupgradeneeded = () => {
-                if (!request.result.objectStoreNames.contains(QA_STORE)) {
-                    request.result.createObjectStore(QA_STORE);
-                }
-            };
-            request.onsuccess = () => {
-                const db = request.result;
-                db.onversionchange = () => {
-                    _qaDbPromise = null;
-                    db.close();
-                };
-                db.onclose = () => {
-                    _qaDbPromise = null;
-                };
-                resolve(db);
-            };
-            request.onerror = () => {
-                _qaDbPromise = null;
-                resolve(null);
-            };
-        } catch {
-            _qaDbPromise = null;
-            resolve(null);
+    _qaDbPromise = openIndexedDbAtLeast(QA_DB_NAME, QA_DB_VERSION, (db) => {
+        if (!db.objectStoreNames.contains(QA_STORE)) {
+            db.createObjectStore(QA_STORE);
         }
+    }).then((db) => {
+        db.onversionchange = () => {
+            _qaDbPromise = null;
+            db.close();
+        };
+        db.onclose = () => {
+            _qaDbPromise = null;
+        };
+        return db;
+    }).catch(() => {
+        _qaDbPromise = null;
+        return null;
     });
     return _qaDbPromise;
 }
@@ -307,27 +297,47 @@ function emit(skipContextUsageRecalc = false) {
 
 let _persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-function persistState() {
+async function writeQaStateNow(): Promise<void> {
     if (typeof indexedDB === "undefined") return;
-    if (_persistTimer) clearTimeout(_persistTimer);
-    _persistTimer = setTimeout(() => {
-        _persistTimer = null;
-        void getQaDb().then((db) => {
-            if (!db) return;
-            try {
-                const tx = db.transaction(QA_STORE, "readwrite");
-                const state: PersistedState = { sessions, activeSessionId };
-                tx.objectStore(QA_STORE).put(state, QA_STATE_KEY);
-            } catch {
-                // 忽略持久化失败，内存态仍可用。
-            }
-        });
-    }, 120);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        const db = await getQaDb();
+        if (!db) return;
+        try {
+            const tx = db.transaction(QA_STORE, "readwrite");
+            const done = new Promise<void>((resolve, reject) => {
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+                tx.onabort = () => reject(tx.error);
+            });
+            const state: PersistedState = { sessions, activeSessionId };
+            tx.objectStore(QA_STORE).put(state, QA_STATE_KEY);
+            await done;
+            return;
+        } catch {
+            _qaDbPromise = null;
+        }
+    }
 }
 
-function publish(options?: { persist?: boolean }) {
+function persistState(immediate = false): Promise<void> {
+    if (typeof indexedDB === "undefined") return Promise.resolve();
+    if (_persistTimer) {
+        clearTimeout(_persistTimer);
+        _persistTimer = null;
+    }
+    if (immediate) {
+        return writeQaStateNow();
+    }
+    _persistTimer = setTimeout(() => {
+        _persistTimer = null;
+        void writeQaStateNow();
+    }, 120);
+    return Promise.resolve();
+}
+
+function publish(options?: { persist?: boolean; immediate?: boolean }) {
     const shouldPersist = options?.persist !== false;
-    if (shouldPersist) persistState();
+    if (shouldPersist) void persistState(options?.immediate === true);
     emit(!shouldPersist);
 }
 
@@ -560,7 +570,7 @@ export function editAndResendQaMessage(
     return { ok: true };
 }
 
-function updateSession(sessionId: string, updater: (session: QaSession) => QaSession, options?: { persist?: boolean }) {
+function updateSession(sessionId: string, updater: (session: QaSession) => QaSession, options?: { persist?: boolean; immediate?: boolean }) {
     const idx = sessions.findIndex((s) => s.id === sessionId);
     if (idx < 0) return;
     const prev = sessions[idx];
@@ -656,7 +666,19 @@ export async function sendQaMessage(
             (s) => ({
                 ...s,
                 updatedAt: Date.now(),
-                messages: s.messages.map((m) => (m.id === assistantMsg.id ? { ...m, ...patch } : m)),
+                messages: s.messages.map((m) => {
+                    if (m.id !== assistantMsg.id) return m;
+                    // 若用户在流式收尾前已点击「应用」或「取消」使 m.pendingCommit 状态推进，
+                    // 绝不能用局部变量 stagedCommit 的旧 "pending" 状态把它覆盖回待应用状态。
+                    const effectivePendingCommit =
+                        patch.pendingCommit &&
+                        patch.pendingCommit.status === "pending" &&
+                        m.pendingCommit &&
+                        m.pendingCommit.status !== "pending"
+                            ? m.pendingCommit
+                            : ("pendingCommit" in patch ? patch.pendingCommit : m.pendingCommit);
+                    return { ...m, ...patch, pendingCommit: effectivePendingCommit };
+                }),
             }),
             { persist: options?.persist !== false },
         );
@@ -907,13 +929,18 @@ export async function retryQaMessage(assistantMsgId: string): Promise<void> {
 
 // ── 提交提案的确认 / 应用 / 撤销 ────────────────────
 
-function patchPendingCommit(sessionId: string, msgId: string, patch: Partial<QaPendingCommit>) {
-    updateSession(sessionId, (s) => ({
-        ...s,
-        messages: s.messages.map((m) =>
-            m.id === msgId && m.pendingCommit ? { ...m, pendingCommit: { ...m.pendingCommit, ...patch } } : m,
-        ),
-    }));
+function patchPendingCommit(sessionId: string, msgId: string, patch: Partial<QaPendingCommit>): Promise<void> {
+    updateSession(
+        sessionId,
+        (s) => ({
+            ...s,
+            messages: s.messages.map((m) =>
+                m.id === msgId && m.pendingCommit ? { ...m, pendingCommit: { ...m.pendingCommit, ...patch } } : m,
+            ),
+        }),
+        { persist: false },
+    );
+    return persistState(true);
 }
 
 function findMsgWithPending(msgId: string): { sessionId: string; pending: QaPendingCommit } | null {
@@ -930,15 +957,15 @@ export async function applyQaCommit(msgId: string): Promise<void> {
     if (!found || found.pending.status !== "pending") return;
     const config = loadQaGithubConfig();
     if (!config) {
-        patchPendingCommit(found.sessionId, msgId, { status: "canceled", error: "仓库配置已丢失。" });
+        await patchPendingCommit(found.sessionId, msgId, { status: "canceled", error: "仓库配置已丢失。" });
         return;
     }
-    patchPendingCommit(found.sessionId, msgId, { status: "applying" });
+    await patchPendingCommit(found.sessionId, msgId, { status: "applying" });
     try {
         const result = await commitQaFiles(config, found.pending.proposal);
-        patchPendingCommit(found.sessionId, msgId, { status: "applied", result });
+        await patchPendingCommit(found.sessionId, msgId, { status: "applied", result });
     } catch (error) {
-        patchPendingCommit(found.sessionId, msgId, { status: "pending", error: formatQaErrorMessage(error) });
+        await patchPendingCommit(found.sessionId, msgId, { status: "pending", error: formatQaErrorMessage(error) });
     }
 }
 
@@ -946,7 +973,7 @@ export async function applyQaCommit(msgId: string): Promise<void> {
 export function cancelQaCommit(msgId: string): void {
     const found = findMsgWithPending(msgId);
     if (!found || found.pending.status !== "pending") return;
-    patchPendingCommit(found.sessionId, msgId, { status: "canceled" });
+    void patchPendingCommit(found.sessionId, msgId, { status: "canceled" });
 }
 
 /** 用户点「撤销」：回退已应用的提交。 */
@@ -955,11 +982,11 @@ export async function revertQaAppliedCommit(msgId: string): Promise<void> {
     if (!found || found.pending.status !== "applied" || !found.pending.result) return;
     const config = loadQaGithubConfig();
     if (!config) return;
-    patchPendingCommit(found.sessionId, msgId, { status: "reverting" });
+    await patchPendingCommit(found.sessionId, msgId, { status: "reverting" });
     try {
         await revertQaCommit(config, found.pending.result);
-        patchPendingCommit(found.sessionId, msgId, { status: "reverted" });
+        await patchPendingCommit(found.sessionId, msgId, { status: "reverted" });
     } catch (error) {
-        patchPendingCommit(found.sessionId, msgId, { status: "applied", error: formatQaErrorMessage(error) });
+        await patchPendingCommit(found.sessionId, msgId, { status: "applied", error: formatQaErrorMessage(error) });
     }
 }

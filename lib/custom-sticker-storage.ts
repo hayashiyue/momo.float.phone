@@ -323,9 +323,17 @@ export function getCustomStickerExample(characterId: string): string {
     return `[表情包:${stickers[0].name}]`;
 }
 
-/** Find a custom sticker by name for a given character. */
+/** Find a custom sticker by name for a given character (falls back to all packs if characterId is a group or unassigned). */
 export function findCustomStickerByName(characterId: string, name: string): StickerItem | undefined {
-    return loadCustomStickers(characterId).find(s => s.name === name);
+    if (characterId) {
+        const direct = loadCustomStickers(characterId).find(s => s.name === name);
+        if (direct) return direct;
+    }
+    for (const pack of readPacks()) {
+        const found = pack.stickers.find(s => s.name === name);
+        if (found) return found;
+    }
+    return undefined;
 }
 
 /** Resolve a single sticker's image URL from IndexedDB. */

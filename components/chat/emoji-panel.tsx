@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { loadStickerPacksForCharacters, resolvePackStickerMap, type StickerPack } from "@/lib/custom-sticker-storage";
+import { loadStickerPacksForCharacters, type StickerPack } from "@/lib/custom-sticker-storage";
+import { getThemeAssetMap } from "@/lib/theme-storage";
 import { BUILTIN_SCREEN_EFFECTS, loadBuiltinScreenEffectSettings } from "@/lib/chat-screen-effects";
 
 // ── Emoji categories ─────────────────────────────
@@ -151,21 +152,9 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
             setPackUrlMap({});
             return;
         }
-        let cancelled = false;
         const packs = loadStickerPacksForCharacters(ids).filter(pack => pack.stickers.length > 0);
         setStickerPacks(packs);
         setActivePackId(prev => (prev && packs.some(pack => pack.id === prev) ? prev : packs[0]?.id ?? null));
-        Promise.all(packs.map(async pack => [pack.id, await resolvePackStickerMap(pack)] as const)).then(entries => {
-            if (cancelled) return;
-            const next: Record<string, string> = {};
-            for (const [packId, map] of entries) {
-                for (const [name, url] of Object.entries(map)) {
-                    next[`${packId}:${name}`] = url;
-                }
-            }
-            setPackUrlMap(next);
-        });
-        return () => { cancelled = true; };
     }, [characterId, characterIds]);
 
     const activePack = stickerPacks.find(pack => pack.id === activePackId) ?? stickerPacks[0] ?? null;
@@ -173,6 +162,41 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
     useEffect(() => {
         setVisibleLimit(STICKER_PAGE_BATCH);
     }, [activePack?.id]);
+
+    useEffect(() => {
+        if (!activePack) return;
+        let cancelled = false;
+        const visibleStickers = activePack.stickers.slice(0, visibleLimit);
+        const immediate: Record<string, string> = {};
+        const pendingAssetIds: string[] = [];
+        for (const s of visibleStickers) {
+            const key = `${activePack.id}:${s.name}`;
+            if (packUrlMap[key]) continue;
+            if (s.externalUrl) {
+                immediate[key] = s.externalUrl;
+            } else if (s.assetId) {
+                pendingAssetIds.push(s.assetId);
+            }
+        }
+        if (Object.keys(immediate).length > 0) {
+            setPackUrlMap(prev => ({ ...prev, ...immediate }));
+        }
+        if (pendingAssetIds.length > 0) {
+            getThemeAssetMap(pendingAssetIds).then(assetMap => {
+                if (cancelled) return;
+                const resolved: Record<string, string> = {};
+                for (const s of visibleStickers) {
+                    if (s.assetId && assetMap[s.assetId]) {
+                        resolved[`${activePack.id}:${s.name}`] = assetMap[s.assetId];
+                    }
+                }
+                if (Object.keys(resolved).length > 0) {
+                    setPackUrlMap(prev => ({ ...prev, ...resolved }));
+                }
+            }).catch(() => {});
+        }
+        return () => { cancelled = true; };
+    }, [activePack, visibleLimit]); // eslint-disable-line react-hooks/exhaustive-deps
 
     return (
         <div className="h-[220px] flex flex-col">
