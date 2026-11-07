@@ -1617,25 +1617,35 @@ function PokeBubble({ msg, charName, userName }: { msg: ChatMessage; charName?: 
 // In-memory cache: assetId/name → resolved URL (survives re-renders, cleared on page reload)
 const _stickerUrlCache = new Map<string, string>();
 
-/** Pre-populate sticker cache only for stickers actually used in the visible message window. */
+/** Pre-populate sticker cache only for stickers actually used in the visible message window (single-transaction batch read). */
 export async function prewarmStickerCache(characterId: string, onlyNames?: Set<string>): Promise<void> {
     if (onlyNames && onlyNames.size === 0) return;
-    const { findCustomStickerByName, resolveCustomStickerUrl } = await import("@/lib/custom-sticker-storage");
     if (onlyNames) {
-        await Promise.all(Array.from(onlyNames).map(async (name) => {
+        const [{ loadCustomStickers }, { getThemeAssetMap }] = await Promise.all([
+            import("@/lib/custom-sticker-storage"),
+            import("@/lib/theme-storage"),
+        ]);
+        const stickers = loadCustomStickers(characterId);
+        const byName = new Map(stickers.map(s => [s.name, s]));
+        const pendingAssets: Array<{ cacheKey: string; assetId: string }> = [];
+        for (const name of onlyNames) {
             const cacheKey = `${characterId}:${name}`;
-            if (_stickerUrlCache.has(cacheKey)) return;
-            const sticker = findCustomStickerByName(characterId, name);
-            if (!sticker) return;
+            if (_stickerUrlCache.has(cacheKey)) continue;
+            const sticker = byName.get(name);
+            if (!sticker) continue;
             if (sticker.externalUrl) {
                 _stickerUrlCache.set(cacheKey, sticker.externalUrl);
-                return;
+            } else if (sticker.assetId) {
+                pendingAssets.push({ cacheKey, assetId: sticker.assetId });
             }
-            if (sticker.assetId) {
-                const url = await resolveCustomStickerUrl(sticker.assetId);
+        }
+        if (pendingAssets.length > 0) {
+            const assetMap = await getThemeAssetMap(pendingAssets.map(p => p.assetId));
+            for (const { cacheKey, assetId } of pendingAssets) {
+                const url = assetMap[assetId];
                 if (url) _stickerUrlCache.set(cacheKey, url);
             }
-        }));
+        }
         return;
     }
     const { resolveCustomStickerMap } = await import("@/lib/custom-sticker-storage");
@@ -1655,7 +1665,16 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
     const [resolvedUrl, setResolvedUrl] = useState<string | null>(cachedUrl || null);
 
     useEffect(() => {
-        if (resolvedUrl || d?.stickerUrl || !label || !characterId) return;
+        if (d?.stickerUrl) {
+            setResolvedUrl(d.stickerUrl);
+            return;
+        }
+        if (!label || !characterId) return;
+        const cached = _stickerUrlCache.get(cacheKey);
+        if (cached) {
+            setResolvedUrl(cached);
+            return;
+        }
         const custom = findCustomStickerByName(characterId, label);
         if (!custom) return;
         if (custom.externalUrl) {
@@ -1664,10 +1683,6 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
             return;
         }
         if (!custom.assetId) return;
-        // Check cache
-        const cached = _stickerUrlCache.get(cacheKey);
-        if (cached) { setResolvedUrl(cached); return; }
-        // Only hit IndexedDB once, then cache
         let cancelled = false;
         resolveCustomStickerUrl(custom.assetId).then(url => {
             if (!cancelled && url) {
@@ -1676,16 +1691,15 @@ function StickerBubble({ msg, characterId }: { msg: ChatMessage; characterId?: s
             }
         });
         return () => { cancelled = true; };
-    }, [label, characterId, d?.stickerUrl]);
+    }, [cacheKey, label, characterId, d?.stickerUrl]);
 
-    const imgUrl = d?.stickerUrl || resolvedUrl;
+    const imgUrl = d?.stickerUrl || cachedUrl || resolvedUrl;
     if (imgUrl) {
         return (
             <div className="chat-sticker chat-sticker-image sticker-bounce p-1">
                 <img
                     src={imgUrl}
                     alt={label || "表情包"}
-                    loading="lazy"
                     decoding="async"
                     className="w-[120px] h-[120px] object-contain"
                     style={{ WebkitTouchCallout: 'none', userSelect: 'none', pointerEvents: 'none' }}

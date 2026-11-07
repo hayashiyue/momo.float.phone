@@ -1037,19 +1037,23 @@ export function prepareShortTermContext(
     const memConfig = loadMemoryConfig();
     const budget = memConfig.shortTermTokenBudget;
     const maxMessagesPerSession = budget > 0 ? Math.max(400, Math.min(1500, Math.ceil(budget / 4))) : 800;
-    let timeline = options?.timeline ?? loadNativeTimeline(characterId, {
-        userName: options?.userName,
-        appId: appId as import("./settings-types").ContentAppId,
-        excludeOfflineSessionId: options?.excludeOfflineSessionId,
-        chatAccountId: undefined,
-        excludeChatSessionId: options?.excludeChatSessionId ?? (appId === "chat" && !options?.includeDirectChatEntries ? options?.history?.[0]?.sessionId : undefined),
-        afterTimestamp: options?.afterTimestamp,
-        timeAware,
-        promptTimestampOptions: options?.promptTimestampOptions,
-        maxMessagesPerSession,
-        allowedSources: memConfig.shortTermAllowedSources,
-    });
-    timeline = filterTimelineByAllowedSources(mergeShortMemoryEntries(characterId, timeline, false, options?.afterTimestamp), memConfig.shortTermAllowedSources);
+    let timeline = options?.timeline
+        ? filterTimelineByAllowedSources(options.timeline, memConfig.shortTermAllowedSources)
+        : filterTimelineByAllowedSources(
+            loadNativeTimeline(characterId, {
+                userName: options?.userName,
+                appId: appId as import("./settings-types").ContentAppId,
+                excludeOfflineSessionId: options?.excludeOfflineSessionId,
+                chatAccountId: undefined,
+                excludeChatSessionId: options?.excludeChatSessionId ?? (appId === "chat" && !options?.includeDirectChatEntries ? options?.history?.[0]?.sessionId : undefined),
+                afterTimestamp: options?.afterTimestamp,
+                timeAware,
+                promptTimestampOptions: options?.promptTimestampOptions,
+                maxMessagesPerSession,
+                allowedSources: memConfig.shortTermAllowedSources,
+            }),
+            memConfig.shortTermAllowedSources,
+        );
 
     // Activation context: full timeline for keyword matching (not truncated)
     const rawHistory = options?.history ?? [];

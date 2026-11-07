@@ -109,12 +109,17 @@ function getContextBudget(): number {
     return DEFAULT_CONTEXT_BUDGET_CHARS;
 }
 
+const _entryCharsMemo = new WeakMap<QaContextEntry, number>();
+
 function entryChars(entry: QaContextEntry): number {
+    const cached = _entryCharsMemo.get(entry);
+    if (cached !== undefined) return cached;
     let total = entry.content.length;
     for (const file of entry.files ?? []) total += file.name.length + file.content.length;
     for (const call of entry.toolCalls ?? []) {
         total += call.name.length + JSON.stringify(call.args ?? {}).length;
     }
+    _entryCharsMemo.set(entry, total);
     return total;
 }
 
@@ -249,52 +254,81 @@ function makeId(): string {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function openQaDb(): IDBOpenDBRequest {
-    const request = indexedDB.open(QA_DB_NAME, QA_DB_VERSION);
-    request.onupgradeneeded = () => {
-        if (!request.result.objectStoreNames.contains(QA_STORE)) {
-            request.result.createObjectStore(QA_STORE);
+let _qaDbPromise: Promise<IDBDatabase | null> | null = null;
+
+function getQaDb(): Promise<IDBDatabase | null> {
+    if (typeof indexedDB === "undefined") return Promise.resolve(null);
+    if (_qaDbPromise) return _qaDbPromise;
+    _qaDbPromise = new Promise<IDBDatabase | null>((resolve) => {
+        try {
+            const request = indexedDB.open(QA_DB_NAME, QA_DB_VERSION);
+            request.onupgradeneeded = () => {
+                if (!request.result.objectStoreNames.contains(QA_STORE)) {
+                    request.result.createObjectStore(QA_STORE);
+                }
+            };
+            request.onsuccess = () => {
+                const db = request.result;
+                db.onversionchange = () => {
+                    _qaDbPromise = null;
+                    db.close();
+                };
+                db.onclose = () => {
+                    _qaDbPromise = null;
+                };
+                resolve(db);
+            };
+            request.onerror = () => {
+                _qaDbPromise = null;
+                resolve(null);
+            };
+        } catch {
+            _qaDbPromise = null;
+            resolve(null);
         }
-    };
-    return request;
+    });
+    return _qaDbPromise;
 }
 
-function emit() {
+function emit(skipContextUsageRecalc = false) {
+    const nextUsage = skipContextUsageRecalc
+        ? snapshot.contextUsage
+        : contextUsageOf(sessions.find((s) => s.id === activeSessionId) ?? null);
     snapshot = {
         sessions,
         activeSessionId,
         hydrated,
         isGenerating,
-        contextUsage: contextUsageOf(sessions.find((s) => s.id === activeSessionId) ?? null),
+        contextUsage: nextUsage,
         isCompacting,
     };
     for (const listener of listeners) listener();
 }
 
+let _persistTimer: ReturnType<typeof setTimeout> | null = null;
+
 function persistState() {
     if (typeof indexedDB === "undefined") return;
-    try {
-        const request = openQaDb();
-        request.onsuccess = () => {
+    if (_persistTimer) clearTimeout(_persistTimer);
+    _persistTimer = setTimeout(() => {
+        _persistTimer = null;
+        void getQaDb().then((db) => {
+            if (!db) return;
             try {
-                const db = request.result;
                 const tx = db.transaction(QA_STORE, "readwrite");
                 const state: PersistedState = { sessions, activeSessionId };
                 tx.objectStore(QA_STORE).put(state, QA_STATE_KEY);
-                tx.oncomplete = () => db.close();
-                tx.onerror = () => db.close();
             } catch {
                 // 忽略持久化失败，内存态仍可用。
             }
-        };
-    } catch {
-        // ignore
-    }
+        });
+    }, 120);
 }
 
 function publish(options?: { persist?: boolean }) {
-    if (options?.persist !== false) persistState();
-    emit();
+    const shouldPersist = options?.persist !== false;
+    if (shouldPersist) persistState();
+    emit(!shouldPersist);
 }
 
 export function subscribeQaChat(listener: () => void): () => void {
@@ -328,49 +362,40 @@ export async function hydrateQaChat(): Promise<void> {
             resolve();
             return;
         }
-        try {
-            const request = openQaDb();
-            request.onsuccess = () => {
-                try {
-                    const db = request.result;
-                    const tx = db.transaction(QA_STORE, "readonly");
-                    const get = tx.objectStore(QA_STORE).get(QA_STATE_KEY);
-                    get.onsuccess = () => {
-                        const state = get.result as PersistedState | undefined;
-                        if (state && Array.isArray(state.sessions)) {
-                            sessions = state.sessions.slice(0, MAX_SESSIONS);
-                            activeSessionId =
-                                state.activeSessionId && sessions.some((s) => s.id === state.activeSessionId)
-                                    ? state.activeSessionId
-                                    : (sessions[0]?.id ?? null);
-                        }
-                        hydrated = true;
-                        emit();
-                        db.close();
-                        resolve();
-                    };
-                    get.onerror = () => {
-                        hydrated = true;
-                        emit();
-                        db.close();
-                        resolve();
-                    };
-                } catch {
-                    hydrated = true;
-                    emit();
-                    resolve();
-                }
-            };
-            request.onerror = () => {
+        void getQaDb().then((db) => {
+            if (!db) {
                 hydrated = true;
                 emit();
                 resolve();
-            };
-        } catch {
-            hydrated = true;
-            emit();
-            resolve();
-        }
+                return;
+            }
+            try {
+                const tx = db.transaction(QA_STORE, "readonly");
+                const get = tx.objectStore(QA_STORE).get(QA_STATE_KEY);
+                get.onsuccess = () => {
+                    const state = get.result as PersistedState | undefined;
+                    if (state && Array.isArray(state.sessions)) {
+                        sessions = state.sessions.slice(0, MAX_SESSIONS);
+                        activeSessionId =
+                            state.activeSessionId && sessions.some((s) => s.id === state.activeSessionId)
+                                ? state.activeSessionId
+                                : (sessions[0]?.id ?? null);
+                    }
+                    hydrated = true;
+                    emit();
+                    resolve();
+                };
+                get.onerror = () => {
+                    hydrated = true;
+                    emit();
+                    resolve();
+                };
+            } catch {
+                hydrated = true;
+                emit();
+                resolve();
+            }
+        });
     });
     return hydratePromise;
 }

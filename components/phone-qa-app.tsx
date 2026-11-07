@@ -890,7 +890,16 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
     () => snapshot.sessions.find((s) => s.id === snapshot.activeSessionId) ?? null,
     [snapshot.sessions, snapshot.activeSessionId],
   );
-  const messages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
+  const allMessages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
+  const [visibleMsgLimit, setVisibleMsgLimit] = useState(24);
+  useEffect(() => {
+    setVisibleMsgLimit(24);
+  }, [snapshot.activeSessionId]);
+  const messages = useMemo(
+    () => (allMessages.length > visibleMsgLimit ? allMessages.slice(-visibleMsgLimit) : allMessages),
+    [allMessages, visibleMsgLimit],
+  );
+  const hiddenMsgCount = Math.max(0, allMessages.length - messages.length);
   const createdContent = useMemo(() => activeSession?.createdContent ?? [], [activeSession]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewItem, setPreviewItem] = useState<QaCreatedContent | null>(null);
@@ -1137,6 +1146,16 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
           </div>
         ) : (
           <div className="qa-messages">
+            {hiddenMsgCount > 0 && (
+              <button
+                type="button"
+                className="qa-sheet-btn"
+                style={{ alignSelf: "center", margin: "4px 0 8px", fontSize: 12 }}
+                onClick={() => setVisibleMsgLimit((v) => v + 24)}
+              >
+                查看更早的 {Math.min(24, hiddenMsgCount)} 条消息（还有 {hiddenMsgCount} 条）
+              </button>
+            )}
             {messages.map((msg) => (
               <QaMessageItem key={msg.id} msg={msg} isStreaming={msg.id === streamingMsgId} onRetry={handleRetry} onViewImage={setViewerImage} onCopy={handleCopyMessage} onEdit={handleEditMessage} />
             ))}

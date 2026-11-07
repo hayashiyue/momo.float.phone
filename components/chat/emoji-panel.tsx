@@ -207,7 +207,7 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
                         >
                             <div className="w-9 h-9 flex items-center justify-center shrink-0">
                                 {url ? (
-                                    <img src={url} alt={sticker.name} loading="lazy" decoding="async" className="w-9 h-9 object-contain" />
+                                    <img src={url} alt={sticker.name} decoding="async" className="w-9 h-9 object-contain" />
                                 ) : (
                                     <span className="ts-9 text-[var(--c-text)] max-w-full truncate">{sticker.name}</span>
                                 )}
