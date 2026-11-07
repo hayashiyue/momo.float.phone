@@ -625,13 +625,13 @@ export async function refreshScheduledBailouts(): Promise<void> {
     }
 }
 
-/** 安装刷新钩子：切后台时 + 启动后一次。 */
+/** 安装刷新钩子：仅在启动后空闲时执行，严禁在切后台(document.hidden)瞬间全量构建多个角色的完整 Prompt 快照（否则必触发 iOS 后台内存红线被系统 Jetsam 强杀重启）。 */
 export function installScheduledBailoutRefresher(): void {
     if (typeof window === "undefined") return;
-    document.addEventListener("visibilitychange", () => {
-        if (document.hidden) void refreshScheduledBailouts();
-    });
-    window.setTimeout(() => { void refreshScheduledBailouts(); }, 20_000);
+    window.setTimeout(() => {
+        if (typeof document !== "undefined" && document.hidden) return;
+        void refreshScheduledBailouts();
+    }, 20_000);
 }
 
 /** 撤销追问兜底预约：带 count 只撤该轮的精确键，不带则撤该会话全部。 */

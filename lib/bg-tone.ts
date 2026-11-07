@@ -91,32 +91,37 @@ function sampleImageColor(url: string): Promise<RgbColor | null> {
     img.crossOrigin = "anonymous";
     img.onload = () => {
       const canvas = document.createElement("canvas");
-      const size = 50;
-      canvas.width = size;
-      canvas.height = size;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) { resolve(null); return; }
-      ctx.drawImage(img, 0, 0, size, size);
-      const sampleH = Math.round(size * 0.4);
-      let data: Uint8ClampedArray;
       try {
-        data = ctx.getImageData(0, 0, size, sampleH).data;
-      } catch {
-        resolve(null);
-        return;
+        const size = 50;
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { resolve(null); return; }
+        ctx.drawImage(img, 0, 0, size, size);
+        const sampleH = Math.round(size * 0.4);
+        let data: Uint8ClampedArray;
+        try {
+          data = ctx.getImageData(0, 0, size, sampleH).data;
+        } catch {
+          resolve(null);
+          return;
+        }
+        let red = 0;
+        let green = 0;
+        let blue = 0;
+        let weight = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          const alpha = data[i + 3] / 255;
+          red += (data[i] * alpha) + (255 * (1 - alpha));
+          green += (data[i + 1] * alpha) + (255 * (1 - alpha));
+          blue += (data[i + 2] * alpha) + (255 * (1 - alpha));
+          weight += 1;
+        }
+        resolve(weight > 0 ? { r: red / weight, g: green / weight, b: blue / weight } : null);
+      } finally {
+        canvas.width = 0;
+        canvas.height = 0;
       }
-      let red = 0;
-      let green = 0;
-      let blue = 0;
-      let weight = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const alpha = data[i + 3] / 255;
-        red += (data[i] * alpha) + (255 * (1 - alpha));
-        green += (data[i + 1] * alpha) + (255 * (1 - alpha));
-        blue += (data[i + 2] * alpha) + (255 * (1 - alpha));
-        weight += 1;
-      }
-      resolve(weight > 0 ? { r: red / weight, g: green / weight, b: blue / weight } : null);
     };
     img.onerror = () => resolve(null);
     img.src = url;

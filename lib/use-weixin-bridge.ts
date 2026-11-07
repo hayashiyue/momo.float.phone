@@ -72,12 +72,25 @@ function ensureAudioCreated() {
 
 /** 用户触摸时尝试播放（浏览器要求音频必须在用户手势中启动） */
 function onUserGesture() {
-    if (!_keepAliveWanted || !_keepAliveAudio) return;
+    if (!_keepAliveWanted || _suspendedForCall || !_keepAliveAudio) return;
+    if (!_keepAliveAudio.paused) {
+        document.removeEventListener("pointerdown", onUserGesture, true);
+        document.removeEventListener("touchstart", onUserGesture, true);
+        document.removeEventListener("click", onUserGesture, true);
+        return;
+    }
     _keepAliveAudio.play().then(() => {
         // 成功了，移除监听
+        document.removeEventListener("pointerdown", onUserGesture, true);
         document.removeEventListener("touchstart", onUserGesture, true);
         document.removeEventListener("click", onUserGesture, true);
     }).catch(() => {});
+}
+
+function armGestureRestore() {
+    document.addEventListener("pointerdown", onUserGesture, { capture: true, once: false });
+    document.addEventListener("touchstart", onUserGesture, { capture: true, once: false });
+    document.addEventListener("click", onUserGesture, { capture: true, once: false });
 }
 
 async function startKeepAlive() {
@@ -85,7 +98,7 @@ async function startKeepAlive() {
 
     // Wake Lock
     try {
-        if ("wakeLock" in navigator) {
+        if ("wakeLock" in navigator && !_wakeLock && document.visibilityState === "visible") {
             _wakeLock = await navigator.wakeLock.request("screen");
             _wakeLock.addEventListener("release", () => { _wakeLock = null; });
         }
@@ -94,12 +107,15 @@ async function startKeepAlive() {
     // 准备音频
     ensureAudioCreated();
 
+    // iOS 切去其他有声 App 后音频会话常被系统中断（paused 变 true），始终挂上触摸恢复兜底
+    armGestureRestore();
+
     // 先尝试直接播放（如果之前已有用户手势则可以成功）
-    _keepAliveAudio!.play().catch(() => {
-        // 失败了：注册监听，等下一次用户触摸时播放
-        document.addEventListener("touchstart", onUserGesture, { capture: true, once: false });
-        document.addEventListener("click", onUserGesture, { capture: true, once: false });
-    });
+    if (_keepAliveAudio!.paused) {
+        _keepAliveAudio!.play().catch(() => {
+            armGestureRestore();
+        });
+    }
 }
 
 function stopKeepAlive() {
@@ -111,6 +127,7 @@ function stopKeepAlive() {
         _keepAliveAudio.pause();
         _keepAliveAudio.currentTime = 0;
     }
+    document.removeEventListener("pointerdown", onUserGesture, true);
     document.removeEventListener("touchstart", onUserGesture, true);
     document.removeEventListener("click", onUserGesture, true);
 }

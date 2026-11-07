@@ -1985,6 +1985,25 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     };
   }, [desktopReady]);
 
+  // iOS Safari 从后台切回前台时，WebKit 偶发回收毛玻璃/壁纸合成层纹理导致黑屏，强制唤醒一次合成器重绘
+  useEffect(() => {
+    const repaintOnResume = () => {
+      if (document.visibilityState !== "visible") return;
+      const shell = shellRef.current;
+      if (!shell) return;
+      shell.style.transform = "translateZ(0)";
+      requestAnimationFrame(() => {
+        if (shellRef.current) shellRef.current.style.transform = "";
+      });
+    };
+    document.addEventListener("visibilitychange", repaintOnResume);
+    window.addEventListener("pageshow", repaintOnResume);
+    return () => {
+      document.removeEventListener("visibilitychange", repaintOnResume);
+      window.removeEventListener("pageshow", repaintOnResume);
+    };
+  }, []);
+
   const initialThemeFetchSkippedRef = useRef(false);
 
   useEffect(() => {

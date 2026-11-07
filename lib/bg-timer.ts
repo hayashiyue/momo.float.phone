@@ -2,10 +2,20 @@
 // Background-safe timers using a Web Worker heartbeat.
 // Falls back to native setInterval/setTimeout when Worker is unavailable.
 
+import { kvGet } from "./kv-db";
+
 let worker: Worker | null = null;
 const callbacks = new Map<string, () => void>();
 const intervalIds = new Set<string>();
 let idCounter = 0;
+
+function isKeepAliveEnabled(): boolean {
+    try {
+        return kvGet("weixin_keepalive_v1") === "1";
+    } catch {
+        return false;
+    }
+}
 
 function ensureWorker(): Worker | null {
     if (worker) return worker;
@@ -15,8 +25,13 @@ function ensureWorker(): Worker | null {
         worker.onmessage = (e) => {
             if (e.data.type === "tick") {
                 const id = e.data.id as string;
-                // iOS Safari 后台挂起期间暂停周期性轮询回调，防止后台唤醒跑重任务触发 WebKit 内存超限重启
-                if (intervalIds.has(id) && typeof document !== "undefined" && document.visibilityState === "hidden") {
+                // 若用户未开启后台保活且页面处于后台隐藏状态，才跳过周期性轮询；开启了后台保活则照常运行
+                if (
+                    intervalIds.has(id)
+                    && typeof document !== "undefined"
+                    && document.visibilityState === "hidden"
+                    && !isKeepAliveEnabled()
+                ) {
                     return;
                 }
                 const cb = callbacks.get(id);

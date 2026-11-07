@@ -513,8 +513,6 @@ export function installBridgeServerSync(): void {
     window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, () => scheduleSync(3_000));
     window.addEventListener(CHAT_MESSAGES_DELETED_EVENT, () => scheduleSync(3_000));
     window.addEventListener("chat-messages-updated", () => scheduleSync(3_000));
-    document.addEventListener("visibilitychange", () => {
-        if (document.hidden) void runSync();
-    });
+    // 严禁在 document.hidden 切后台瞬间立即跑 runSync 全量组装 Prompt 快照（切后台瞬间内存红线极低，跑重任务必被 iOS 强杀重启）；前台消息/规则变动已有 3s 防抖同步。
     scheduleSync(15_000);
 }
