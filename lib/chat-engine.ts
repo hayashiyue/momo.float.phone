@@ -550,8 +550,10 @@ export function publishDebugPromptSnapshot(params: {
     options?: DebugPromptRequestOptions;
     requestKind: "completion" | "native-tools" | "native-tools-stream";
     tools?: LlmToolDefinition[];
+    force?: boolean;
 }): DebugPromptSnapshot {
-    const { request, config, preset, meta, options, requestKind, tools } = params;
+    const { request, config, preset, meta, options, requestKind, tools, force } = params;
+    const viewerEnabled = force || (typeof window !== "undefined" && loadChatAppSettings().promptViewerEnabled === true);
     const snapshot: DebugPromptSnapshot = {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         timestamp: new Date().toISOString(),
@@ -564,10 +566,11 @@ export function publishDebugPromptSnapshot(params: {
         sessionId: options?.debugSessionId,
         characterName: meta?.characterName,
         presetName: preset?.name || "默认预设",
-        messages: debugMessagesFromRequest(request),
-        tools: tools?.map(tool => ({ name: tool.name, description: tool.description })),
+        // 未开启提示词查看器且非显式预览调用时，不深拷贝整份数百KB~数MB的请求快照常驻内存
+        messages: viewerEnabled ? debugMessagesFromRequest(request) : [],
+        tools: viewerEnabled ? tools?.map(tool => ({ name: tool.name, description: tool.description })) : undefined,
     };
-    if (typeof window !== "undefined") setDebugPromptSnapshot(snapshot);
+    if (viewerEnabled && typeof window !== "undefined") setDebugPromptSnapshot(snapshot);
     return snapshot;
 }
 
@@ -981,30 +984,35 @@ export async function sendLLMRequest(
     const requestMessages = toLlmRequestMessages(afterPlugins.messages);
     const request = buildProviderRequest(config, effectivePreset, requestMessages);
     publishDebugPromptSnapshot({ request, config, preset: effectivePreset, meta, options, requestKind: "completion" });
-    const requestBodyJson = JSON.stringify(request.body);
-    const requestBodySize = requestBodyJson.length;
-    const requestTokenEstimate = Math.ceil(requestBodySize / 3);
-    const messageSizes = request.messagesForLog.map((message) => (
-        typeof message.content === "string" ? message.content.length : JSON.stringify(message.content).length
-    ));
-    const largestMessage = messageSizes.reduce(
-        (largest, size, index) => (size > largest.size ? { index, size, role: request.messagesForLog[index]?.role ?? "" } : largest),
-        { index: -1, size: 0, role: "" },
-    );
+    // 轻量字符估算：严禁在 fetchLlmPayload 之前把整份 request.body（可能含多模态图片 base64）
+    // 再同步 JSON.stringify 一遍并留在闭包栈帧里，否则内存峰值翻倍极易在 iOS WebKit 触发 OOM 闪退。
+    let estimatedBodyChars = 0;
+    let largestIndex = -1;
+    let largestSize = 0;
+    let largestRole = "";
+    for (let index = 0; index < request.messagesForLog.length; index += 1) {
+        const message = request.messagesForLog[index];
+        const size = typeof message.content === "string"
+            ? message.content.length
+            : message.content.reduce((sum, part) => sum + (part.type === "text" ? part.text.length : (part.image_url?.url?.length ?? 0)), 0);
+        estimatedBodyChars += size + 32;
+        if (size > largestSize) {
+            largestSize = size;
+            largestIndex = index;
+            largestRole = message.role ?? "";
+        }
+    }
     const requestDebugInfo = {
         provider: config.provider,
         model: config.defaultModel,
         appId: options?.appId ?? "chat",
         messageCount: request.messagesForLog.length,
-        bodySize: requestBodySize,
-        bodyTokenEstimate: requestTokenEstimate,
-        largestMessageIndex: largestMessage.index,
-        largestMessageRole: largestMessage.role,
-        largestMessageSize: largestMessage.size,
+        bodySize: estimatedBodyChars,
+        bodyTokenEstimate: Math.ceil(estimatedBodyChars / 3),
+        largestMessageIndex: largestIndex,
+        largestMessageRole: largestRole,
+        largestMessageSize: largestSize,
     };
-
-    console.log("[ChatEngine] Message roles:", request.messagesForLog.map((m, i) => `${i}:${m.role}`).join(" → "));
-    console.log("[ChatEngine] Request:", requestDebugInfo);
 
     const llmAbort = new AbortController();
     const llmTimeout = setTimeout(() => llmAbort.abort(), 500_000);
@@ -3179,6 +3187,7 @@ export async function previewPromptRequestSnapshot(
             },
             requestKind: "native-tools",
             tools: nativeBundle.definitions,
+            force: true,
         });
     }
 
@@ -3194,5 +3203,6 @@ export async function previewPromptRequestSnapshot(
             debugSessionId: session.id,
         },
         requestKind: "completion",
+        force: true,
     });
 }

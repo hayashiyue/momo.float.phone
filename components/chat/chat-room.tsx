@@ -1817,8 +1817,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
     }, [session.chatAccountId, session.contactId]);
 
     const availableShoppingGifts = useMemo(
-        () => loadDeliveredShoppingGifts(),
-        [messages],
+        () => (richModal === "gift" ? loadDeliveredShoppingGifts() : []),
+        [richModal, messages],
     );
 
     useEffect(() => {
@@ -2181,11 +2181,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         };
     }, []);
 
-    // Sync current session+messages to debug store for DebugPromptPanel
+    // Sync current session+messages to debug store for DebugPromptPanel (only when promptViewerEnabled)
     useEffect(() => {
+        if (!loadChatAppSettings().promptViewerEnabled) return;
         setDebugChatState({ session, messages });
         return () => { setDebugChatState(null); };
-    }, [session, messages]);
+    }, [session, messages, chatAppSettingsRevision]);
 
     // Listen for AI-initiated call triggers from follow-up service
     useEffect(() => {
@@ -4328,8 +4329,14 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
     // 线下 XML 构造与提示词查看器共用 lib/offline-prompt-builder（社区 #108），
     // 保证「预览 = 真实发出的提示词」；此处仅包一层稳定引用。
     // 自定义状态栏：custom 生效时新消息盖戳，折叠区改走用户渲染代码；旧消息按原生渲染
-    const statusRegionCfg = getStatusRegionConfig(session.id, !session.isGroup);
-    const customStatusActive = isCustomStatusRegionActive(statusRegionCfg);
+    const statusRegionCfg = useMemo(
+        () => getStatusRegionConfig(session.id, !session.isGroup),
+        [session.id, session.isGroup, chatAppSettingsRevision],
+    );
+    const customStatusActive = useMemo(
+        () => isCustomStatusRegionActive(statusRegionCfg),
+        [statusRegionCfg],
+    );
 
     const formatOfflineTurnXml = useCallback((turn: ChatOfflineTurn): string => formatOfflineTurnXmlShared(turn), []);
 

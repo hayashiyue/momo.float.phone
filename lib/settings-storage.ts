@@ -184,10 +184,16 @@ function preserveCustomAppPresetPrompts(fresh: PresetConfig, previous: PresetCon
 
 // --- Presets ──────────────────────────────────────────
 
+let _presetsMemoSource: PresetConfig[] | null = null;
+let _presetsMemoResult: PresetConfig[] | null = null;
+
 export function loadPresets(): PresetConfig[] {
     if (typeof window === "undefined") return [];
     try {
         const cachedPresets = readPresetsCache();
+        if (cachedPresets === _presetsMemoSource && _presetsMemoResult) {
+            return _presetsMemoResult;
+        }
         const presets: PresetConfig[] = cachedPresets.map(stripDeprecatedPresetFields);
         let shouldPersistCleanup = JSON.stringify(cachedPresets) !== JSON.stringify(presets);
 
@@ -209,6 +215,8 @@ export function loadPresets(): PresetConfig[] {
             savePresets(presets);
         }
 
+        _presetsMemoSource = readPresetsCache();
+        _presetsMemoResult = presets;
         return presets;
     } catch {
         return [];
@@ -275,7 +283,10 @@ function normalizePresetPromptScope(prompt: Prompt): Prompt {
 
 export function savePresets(presets: PresetConfig[]): void {
     if (typeof window === "undefined") return;
-    writePresetsCache(presets.map(stripDeprecatedPresetFields));
+    const cleaned = presets.map(stripDeprecatedPresetFields);
+    writePresetsCache(cleaned);
+    _presetsMemoSource = readPresetsCache();
+    _presetsMemoResult = cleaned;
     // 统一变更通知：预设管理器直接编辑保存此前不发事件，挂载中的聊天页（流式预览
     // 标签配置等）拿不到新配置，最终清洗按新预设、预览按旧预设。监听方刷新是幂等的。
     window.dispatchEvent(new CustomEvent("settings-presets-updated"));
@@ -283,7 +294,10 @@ export function savePresets(presets: PresetConfig[]): void {
 
 export async function savePresetsAsync(presets: PresetConfig[]): Promise<void> {
     if (typeof window === "undefined") return;
-    await writePresetsCacheAsync(presets.map(stripDeprecatedPresetFields));
+    const cleaned = presets.map(stripDeprecatedPresetFields);
+    await writePresetsCacheAsync(cleaned);
+    _presetsMemoSource = readPresetsCache();
+    _presetsMemoResult = cleaned;
     window.dispatchEvent(new CustomEvent("settings-presets-updated"));
 }
 
@@ -656,13 +670,20 @@ function normalizeApiConfig(config: LegacyApiConfig): ApiConfig {
     };
 }
 
+let _apiConfigsMemoRaw: string | null = null;
+let _apiConfigsMemoResult: ApiConfig[] = [];
+
 export function loadApiConfigs(): ApiConfig[] {
     if (typeof window === "undefined") return [];
     try {
         const raw = kvGet(API_CONFIGS_KEY);
         if (!raw) return [];
+        if (raw === _apiConfigsMemoRaw) return _apiConfigsMemoResult;
         const parsed = JSON.parse(raw) as LegacyApiConfig[];
-        return Array.isArray(parsed) ? parsed.map(normalizeApiConfig) : [];
+        const next = Array.isArray(parsed) ? parsed.map(normalizeApiConfig) : [];
+        _apiConfigsMemoRaw = raw;
+        _apiConfigsMemoResult = next;
+        return next;
     } catch {
         return [];
     }
@@ -670,7 +691,11 @@ export function loadApiConfigs(): ApiConfig[] {
 
 export function saveApiConfigs(configs: ApiConfig[]): void {
     if (typeof window === "undefined") return;
-    kvSet(API_CONFIGS_KEY, JSON.stringify(configs.map(normalizeApiConfig)));
+    const normalized = configs.map(normalizeApiConfig);
+    const raw = JSON.stringify(normalized);
+    _apiConfigsMemoRaw = raw;
+    _apiConfigsMemoResult = normalized;
+    kvSet(API_CONFIGS_KEY, raw);
 }
 
 export function loadApiGroups(): ApiGroup[] {
@@ -985,6 +1010,9 @@ function normalizeBindingConfig(config: BindingConfig): { config: BindingConfig;
     };
 }
 
+let _bindingConfigMemoRaw: string | null = null;
+let _bindingConfigMemoResult: BindingConfig | null = null;
+
 export function loadBindingConfig(): BindingConfig {
     if (typeof window === "undefined") return { ...DEFAULT_BINDING_CONFIG };
     try {
@@ -998,8 +1026,13 @@ export function loadBindingConfig(): BindingConfig {
             }
             return { ...DEFAULT_BINDING_CONFIG };
         }
+        if (raw === _bindingConfigMemoRaw && _bindingConfigMemoResult) {
+            return _bindingConfigMemoResult;
+        }
         const normalized = normalizeBindingConfig(JSON.parse(raw) as BindingConfig);
         if (normalized.changed) saveBindingConfig(normalized.config, false);
+        _bindingConfigMemoRaw = kvGet(BINDINGS_KEY) ?? raw;
+        _bindingConfigMemoResult = normalized.config;
         return normalized.config;
     } catch {
         return { ...DEFAULT_BINDING_CONFIG };
@@ -1008,7 +1041,10 @@ export function loadBindingConfig(): BindingConfig {
 
 export function saveBindingConfig(config: BindingConfig, notify: boolean = true): void {
     if (typeof window === "undefined") return;
-    kvSet(BINDINGS_KEY, JSON.stringify(config));
+    const raw = JSON.stringify(config);
+    _bindingConfigMemoRaw = raw;
+    _bindingConfigMemoResult = config;
+    kvSet(BINDINGS_KEY, raw);
     if (notify) window.dispatchEvent(new CustomEvent("settings-bindings-updated"));
 }
 

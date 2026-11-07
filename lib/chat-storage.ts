@@ -906,14 +906,15 @@ export function reindexSessionMessageOrdersByTime(sessionId: string): void {
 }
 
 export function getLastVisibleSessionMessage(sessionId: string): ChatMessage | null {
-    // 热路径只需要“最后一条”，不应先 filter + sort 分配整份会话消息。
-    // 单次线性扫描也能兼容旧数据缺失 order、同时间戳等排序规则。
-    let last: ChatMessage | null = null;
-    for (const msg of _messagesCache) {
-        if (msg.sessionId !== sessionId || !isSessionPreviewCandidate(msg)) continue;
-        if (!last || compareChatMessages(last, msg) < 0) last = msg;
+    // 直接复用已按会话索引并缓存的有序数组从尾部倒序找第一条可见消息（O(1)），
+    // 避免每次调用都线性扫描整张 _messagesCache（数千条消息 × 几十个会话会导致严重卡顿）。
+    const sessionMessages = getSortedSessionMessages(sessionId);
+    for (let i = sessionMessages.length - 1; i >= 0; i -= 1) {
+        if (isSessionPreviewCandidate(sessionMessages[i])) {
+            return sessionMessages[i];
+        }
     }
-    return last;
+    return null;
 }
 
 // ── Storage Keys (settings & follow-up stay in localStorage) ──
@@ -1367,19 +1368,29 @@ function _loadAllMessages(): ChatMessage[] {
 }
 
 // ── CRUD for Contacts ─────────────────────────
+let _contactsNormalizedForRef: ChatContact[] | null = null;
+let _contactsNormalizedSessionsRef: ChatSession[] | null = null;
+
 export function loadChatContacts(): ChatContact[] {
+    if (_contactsNormalizedForRef === _contactsCache && _contactsNormalizedSessionsRef === _sessionsCache) {
+        return _contactsCache;
+    }
     let normalized = normalizeChatContacts(_contactsCache);
     normalized = restoreContactsForPrivateSessions(normalized.items, _sessionsCache);
     if (normalized.changed) {
         _contactsCache = normalized.items;
         if (_hydrated && typeof window !== "undefined") dbReplaceContacts(normalized.items);
     }
+    _contactsNormalizedForRef = _contactsCache;
+    _contactsNormalizedSessionsRef = _sessionsCache;
     return _contactsCache;
 }
 
 export function saveChatContacts(contacts: ChatContact[]) {
     const normalized = normalizeChatContacts(contacts);
     _contactsCache = normalized.items;
+    _contactsNormalizedForRef = _contactsCache;
+    _contactsNormalizedSessionsRef = _sessionsCache;
     if (!_hydrated && typeof window !== "undefined") {
         console.warn("[ChatStorage] saveChatContacts before hydration; using additive write to avoid replacing existing contacts.");
         dbPutContacts(normalized.items);

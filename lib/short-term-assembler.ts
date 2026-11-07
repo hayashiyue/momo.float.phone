@@ -1467,14 +1467,23 @@ export function prepareGroupShortTermContext(
             });
         }
     }
-    for (let i = 0; i < history.length; i++) {
+    // 与单聊对齐：从最新消息往前倒序累加，达到短期记忆 token 预算上限后立即停止
+    const historyPoolItems: PoolItem[] = [];
+    let historyAccumTokens = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
         if (isPromptHiddenChatMessage(history[i], { includeNativeToolHistory: options?.includeNativeToolHistory })) continue;
-        pool.push({
+        const tokens = estimateTokens(history[i].content) + 4;
+        historyPoolItems.push({
             kind: "history",
             timestamp: history[i].createdAt,
-            tokens: estimateTokens(history[i].content) + 4,
+            tokens,
             msgIdx: i,
         });
+        historyAccumTokens += tokens;
+        if (budget > 0 && historyAccumTokens > budget && historyPoolItems.length >= 20) break;
+    }
+    for (let i = historyPoolItems.length - 1; i >= 0; i--) {
+        pool.push(historyPoolItems[i]);
     }
 
     pool.sort((a, b) => a.timestamp.localeCompare(b.timestamp));

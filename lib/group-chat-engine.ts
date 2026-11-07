@@ -351,20 +351,21 @@ async function buildGroupChatPromptMessages(
         const worldBooks = promptProfile?.enableWorldBooks === false
             ? []
             : (charSlot.worldBookIds || []).map(id => allWorldBooks.find(w => w.id === id)).filter(Boolean) as typeof allWorldBooks;
+        const maxMessagesPerSession = memConfig.shortTermTokenBudget > 0
+            ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4)))
+            : 800;
         const timeline = await loadNativeTimelineAsync(charId, {
             appId: "group_chat", userName,
             excludeOfflineSessionId: options?.excludeOfflineSessionId,
             promptTimestampOptions: getPromptTimestampOptionsForTimeContext(memberTimeContext),
+            maxMessagesPerSession,
+            allowedSources: memConfig.shortTermAllowedSources,
         });
         timelines.set(charId, timeline);
-        const { wbActivationContext } = prepareShortTermContext(charId, "group_chat", {
-            timeline,
-            userName,
-            excludeGroupSessionId: isOfflineMode ? undefined : session.id,
-            excludeOfflineSessionId: options?.excludeOfflineSessionId,
-            chatAccountId: session.chatAccountId || null,
-            promptTimestampOptions: getPromptTimestampOptionsForTimeContext(memberTimeContext),
-        });
+        const wbActivationContext = [
+            ...timeline.slice(-10).map(e => e.content),
+            ...history.slice(-10).map(m => m.content),
+        ].slice(-10).join("\n");
         let coreMemories = "", longTermMemories = "";
         try {
             const [coreResults, results] = await Promise.all([
@@ -400,7 +401,11 @@ async function buildGroupChatPromptMessages(
 
     const enabledTools = options?.disableTools ? [] : getEnabledTools("group_chat");
     const usesNativeActions = Boolean(nativeToolProtocolForConfig(config) && enabledTools.length > 0);
-    const annotatedHistory = annotateGroupHistory(history, participantIds, userName);
+    const groupMaxHistoryWindow = memConfig.shortTermTokenBudget > 0
+        ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4)))
+        : 800;
+    const windowedGroupHistory = history.length > groupMaxHistoryWindow ? history.slice(-groupMaxHistoryWindow) : history;
+    const annotatedHistory = annotateGroupHistory(windowedGroupHistory, participantIds, userName);
     const {
         truncatedHistory: truncatedAnnotatedHistory,
         wbActivationContext,
@@ -1304,6 +1309,7 @@ export async function previewGroupPromptRequestSnapshot(
             },
             requestKind: "native-tools",
             tools: nativeBundle.definitions,
+            force: true,
         });
     }
 
@@ -1319,5 +1325,6 @@ export async function previewGroupPromptRequestSnapshot(
             debugSessionId: session.id,
         },
         requestKind: "completion",
+        force: true,
     });
 }

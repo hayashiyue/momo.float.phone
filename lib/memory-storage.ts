@@ -30,11 +30,15 @@ function ensureMemoryIndexes(store: IDBObjectStore): void {
     }
 }
 
+let _memoryDbPromise: Promise<IDBDatabase | null> | null = null;
+const _memoryCacheByCharacter = new Map<string, MemoryEntry[]>();
+
 async function openDb(): Promise<IDBDatabase | null> {
     if (!hasBrowserApi()) return null;
+    if (_memoryDbPromise) return _memoryDbPromise;
     // Open at >= DB_VERSION: a backup restore may have bumped the stored version
     // higher, and opening at a fixed lower version would throw a VersionError.
-    return openIndexedDbAtLeast(DB_NAME, DB_VERSION, (db, _oldVersion, tx) => {
+    _memoryDbPromise = openIndexedDbAtLeast(DB_NAME, DB_VERSION, (db, _oldVersion, tx) => {
         let store: IDBObjectStore;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
             store = db.createObjectStore(STORE_NAME, { keyPath: "id" });
@@ -42,7 +46,21 @@ async function openDb(): Promise<IDBDatabase | null> {
             store = tx!.objectStore(STORE_NAME);
         }
         ensureMemoryIndexes(store);
-    }).catch(() => null);
+    }).then(db => {
+        db.onversionchange = () => {
+            _memoryDbPromise = null;
+            _memoryCacheByCharacter.clear();
+            db.close();
+        };
+        db.onclose = () => {
+            _memoryDbPromise = null;
+        };
+        return db;
+    }).catch(() => {
+        _memoryDbPromise = null;
+        return null;
+    });
+    return _memoryDbPromise;
 }
 
 function runRequest<T>(req: IDBRequest<T>): Promise<T> {
@@ -55,40 +73,36 @@ function runRequest<T>(req: IDBRequest<T>): Promise<T> {
 // ── Long-term Entry CRUD ──
 
 export async function saveMemoryEntry(entry: MemoryEntry): Promise<void> {
+    _memoryCacheByCharacter.delete(entry.characterId);
     const db = await openDb();
     if (!db) return;
-    try {
-        const tx = db.transaction(STORE_NAME, "readwrite");
-        tx.objectStore(STORE_NAME).put(entry);
-        await new Promise<void>((res, rej) => {
-            tx.oncomplete = () => res();
-            tx.onerror = () => rej(tx.error);
-        });
-    } finally {
-        db.close();
-    }
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).put(entry);
+    await new Promise<void>((res, rej) => {
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+    });
 }
 
 export async function loadMemoryEntries(characterId: string): Promise<MemoryEntry[]> {
+    const cached = _memoryCacheByCharacter.get(characterId);
+    if (cached) return cached;
     const db = await openDb();
     if (!db) return [];
+    let entries: MemoryEntry[];
     try {
-        let entries: MemoryEntry[];
-        try {
-            const tx = db.transaction(STORE_NAME, "readonly");
-            const store = tx.objectStore(STORE_NAME);
-            const idx = store.index("by_character");
-            entries = await runRequest(idx.getAll(characterId));
-        } catch {
-            const tx = db.transaction(STORE_NAME, "readonly");
-            const allEntries: MemoryEntry[] = await runRequest(tx.objectStore(STORE_NAME).getAll());
-            entries = allEntries.filter(entry => entry.characterId === characterId);
-        }
-        entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-        return entries;
-    } finally {
-        db.close();
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const store = tx.objectStore(STORE_NAME);
+        const idx = store.index("by_character");
+        entries = await runRequest(idx.getAll(characterId));
+    } catch {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const allEntries: MemoryEntry[] = await runRequest(tx.objectStore(STORE_NAME).getAll());
+        entries = allEntries.filter(entry => entry.characterId === characterId);
     }
+    entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    _memoryCacheByCharacter.set(characterId, entries);
+    return entries;
 }
 
 export async function loadMemoryEntriesByType(
@@ -100,37 +114,31 @@ export async function loadMemoryEntriesByType(
 }
 
 export async function deleteMemoryEntry(id: string): Promise<void> {
+    _memoryCacheByCharacter.clear();
     const db = await openDb();
     if (!db) return;
-    try {
-        const tx = db.transaction(STORE_NAME, "readwrite");
-        tx.objectStore(STORE_NAME).delete(id);
-        await new Promise<void>((res, rej) => {
-            tx.oncomplete = () => res();
-            tx.onerror = () => rej(tx.error);
-        });
-    } finally {
-        db.close();
-    }
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).delete(id);
+    await new Promise<void>((res, rej) => {
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+    });
 }
 
 export async function deleteMemoryEntries(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
+    _memoryCacheByCharacter.clear();
     const db = await openDb();
     if (!db) return;
-    try {
-        const tx = db.transaction(STORE_NAME, "readwrite");
-        const store = tx.objectStore(STORE_NAME);
-        for (const id of ids) {
-            store.delete(id);
-        }
-        await new Promise<void>((res, rej) => {
-            tx.oncomplete = () => res();
-            tx.onerror = () => rej(tx.error);
-        });
-    } finally {
-        db.close();
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    for (const id of ids) {
+        store.delete(id);
     }
+    await new Promise<void>((res, rej) => {
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+    });
 }
 
 export async function deleteCharacterMemories(characterId: string): Promise<void> {
@@ -149,15 +157,11 @@ export async function deleteCharacterMemoriesByType(
 export async function getAllCharacterIdsWithMemories(): Promise<string[]> {
     const db = await openDb();
     if (!db) return [];
-    try {
-        const tx = db.transaction(STORE_NAME, "readonly");
-        const entries: MemoryEntry[] = await runRequest(tx.objectStore(STORE_NAME).getAll());
-        const ids = new Set<string>();
-        for (const e of entries) ids.add(e.characterId);
-        return Array.from(ids);
-    } finally {
-        db.close();
-    }
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const entries: MemoryEntry[] = await runRequest(tx.objectStore(STORE_NAME).getAll());
+    const ids = new Set<string>();
+    for (const e of entries) ids.add(e.characterId);
+    return Array.from(ids);
 }
 
 export async function getMemoryCount(characterId: string): Promise<number> {
@@ -175,12 +179,21 @@ export async function getMemoryCountByType(
 
 // ── Config (localStorage for fast sync access) ──
 
+let _memoryConfigMemoRaw: string | null = null;
+let _memoryConfigMemoResult: MemoryConfig | null = null;
+
 export function loadMemoryConfig(): MemoryConfig {
     if (typeof window === "undefined") return { ...DEFAULT_MEMORY_CONFIG };
     try {
         const raw = kvGet(CONFIG_KEY);
         if (!raw) return { ...DEFAULT_MEMORY_CONFIG };
-        return { ...DEFAULT_MEMORY_CONFIG, ...JSON.parse(raw) };
+        if (raw === _memoryConfigMemoRaw && _memoryConfigMemoResult) {
+            return _memoryConfigMemoResult;
+        }
+        const parsed = { ...DEFAULT_MEMORY_CONFIG, ...JSON.parse(raw) };
+        _memoryConfigMemoRaw = raw;
+        _memoryConfigMemoResult = parsed;
+        return parsed;
     } catch {
         return { ...DEFAULT_MEMORY_CONFIG };
     }
@@ -188,7 +201,10 @@ export function loadMemoryConfig(): MemoryConfig {
 
 export function saveMemoryConfig(config: MemoryConfig): void {
     if (typeof window === "undefined") return;
-    kvSet(CONFIG_KEY, JSON.stringify(config));
+    const raw = JSON.stringify(config);
+    _memoryConfigMemoRaw = raw;
+    _memoryConfigMemoResult = config;
+    kvSet(CONFIG_KEY, raw);
 }
 
 // ── Per-character event counter (localStorage) ──

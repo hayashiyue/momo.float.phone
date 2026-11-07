@@ -138,14 +138,32 @@ export function deleteMomentPost(postId: string): void {
 
 // ── Comments CRUD ──
 
+let _commentsByPostMemoSource: MomentComment[] | null = null;
+let _commentsByPostMemoMap: Map<string, MomentComment[]> | null = null;
+
 export function loadAllMomentComments(): MomentComment[] {
     return _commentsCache ?? [];
 }
 
 export function loadMomentComments(postId: string): MomentComment[] {
-    return loadAllMomentComments()
-        .filter(c => c.postId === postId)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const all = loadAllMomentComments();
+    if (_commentsByPostMemoSource !== all || !_commentsByPostMemoMap) {
+        const map = new Map<string, MomentComment[]>();
+        for (const c of all) {
+            let bucket = map.get(c.postId);
+            if (!bucket) {
+                bucket = [];
+                map.set(c.postId, bucket);
+            }
+            bucket.push(c);
+        }
+        for (const bucket of map.values()) {
+            bucket.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        }
+        _commentsByPostMemoSource = all;
+        _commentsByPostMemoMap = map;
+    }
+    return _commentsByPostMemoMap.get(postId) ?? [];
 }
 
 export function addMomentComment(comment: Omit<MomentComment, "id" | "createdAt"> & { createdAt?: string }): MomentComment {
