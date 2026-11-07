@@ -285,10 +285,13 @@ export async function armFollowUpBailout(
         // 所以照常注入动作目录，别让角色在离线追问里以为自己什么都做不了。
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
-        const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
+        let shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
             return { url: req.url, headers: req.headers, body: req.body, providerKind: req.providerKind };
         }, config.enableImageRecognition === true);
+        if (shortcutContinuation && JSON.stringify({ request, shortcutContinuation }).length > 800_000) {
+            shortcutContinuation = null;
+        }
 
         // 组装耗时不短——上传前复核排期还在且没被改过（用户可能已回复触发了取消）
         const latestSchedule = loadFollowUpSchedule(sessionId);
@@ -441,10 +444,14 @@ export async function armIdleReconnectBailout(rule: IdleReconnectRule): Promise<
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
         const weixinBotId = maybeAppendWeixinChannel(llmMessages, rule.characterId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
-        const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
+        let shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
             return { url: req.url, headers: req.headers, body: req.body, providerKind: req.providerKind };
         }, config.enableImageRecognition === true);
+        // 双份完整 Prompt 快照一旦超过云端 900KB 上限会被 413 拒单，自动降级为单份请求保底送达
+        if (shortcutContinuation && JSON.stringify({ request, shortcutContinuation }).length > 800_000) {
+            shortcutContinuation = null;
+        }
         const remaining = IDLE_RECONNECT_MAX_CONSECUTIVE - effectiveConsecutive - 1;
         // 先挂后清：POST 本身按同键先删后插（幂等覆盖），挂稳后再清理同前缀的其他旧键
         //（旧连发序号、服务端续排的 "+" 后缀键）。之前是先清后挂，切后台/杀进程
@@ -507,10 +514,13 @@ export async function armTimedWakeBailout(schedule: TimedWakeSchedule): Promise<
         maybeAppendShortcutCapability(llmMessages, { continuationAvailable: true });
         const weixinBotId = maybeAppendWeixinChannel(llmMessages, schedule.characterId);
         const request = buildProviderRequest(config, preset, toLlmRequestMessages(llmMessages));
-        const shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
+        let shortcutContinuation = buildOfflineShortcutContinuation(llmMessages, messages => {
             const req = buildProviderRequest(config, preset, toLlmRequestMessages(messages));
             return { url: req.url, headers: req.headers, body: req.body, providerKind: req.providerKind };
         }, config.enableImageRecognition === true);
+        if (shortcutContinuation && JSON.stringify({ request, shortcutContinuation }).length > 800_000) {
+            shortcutContinuation = null;
+        }
         const posted = await postBailoutJob({
             triggerKey: `timedwake:${schedule.id}`,
             kind: "timed_task",
@@ -632,6 +642,17 @@ export function installScheduledBailoutRefresher(): void {
         if (typeof document !== "undefined" && document.hidden) return;
         void refreshScheduledBailouts();
     }, 20_000);
+    let timedRefreshTimer: number | null = null;
+    window.addEventListener("timed-wake-schedules-updated", () => {
+        if (timedRefreshTimer !== null) window.clearTimeout(timedRefreshTimer);
+        timedRefreshTimer = window.setTimeout(() => {
+            timedRefreshTimer = null;
+            if (typeof document !== "undefined" && document.hidden) return;
+            for (const schedule of loadTimedWakeSchedules()) {
+                void armTimedWakeBailout(schedule);
+            }
+        }, 1_500);
+    });
 }
 
 /** 撤销追问兜底预约：带 count 只撤该轮的精确键，不带则撤该会话全部。 */

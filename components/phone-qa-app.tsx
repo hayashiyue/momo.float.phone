@@ -225,10 +225,10 @@ function QaCommitCard({ msg }: { msg: QaMsg }) {
 // ── 消息渲染 ─────────────────────────────────────────
 
 // 工具调用行：折叠的单行摘要，点开展开参数与结果（Claude Code 风格）
-function QaToolRow({ tool }: { tool: QaToolStatus }) {
+const QaToolRow = memo(function QaToolRow({ tool }: { tool: QaToolStatus }) {
   const [open, setOpen] = useState(false);
   // 「电脑文件 op=send」的结果里带文件卡标记：卡片常显，标记从结果文本中剥离
-  const { text: resultText, file } = parseQaFileMarker(tool.result || "");
+  const { text: resultText, file } = useMemo(() => parseQaFileMarker(tool.result || ""), [tool.result]);
   const hasDetail = Boolean(tool.detail || resultText);
   const summary = tool.running ? `正在${tool.name}…` : tool.success === false ? `${tool.name}失败` : tool.name;
   return (
@@ -265,7 +265,7 @@ function QaToolRow({ tool }: { tool: QaToolStatus }) {
       {file && <QaFileCard file={file} />}
     </div>
   );
-}
+});
 
 // 已完成文本的 Markdown 渲染：memo 缓存——流式期间每次增量都全文重排 remark 是
 // 低端机 WebView OOM 崩溃的主因（几万字 × 每秒多次解析）。文本不变就不重渲。
@@ -433,7 +433,8 @@ const QaMessageItem = memo(function QaMessageItem({
 
 // ── 会话抽屉 ─────────────────────────────────────────
 
-function QaSessionDrawer({
+const QaSessionDrawer = memo(function QaSessionDrawer({
+  open,
   sessions,
   activeId,
   onSelect,
@@ -442,6 +443,7 @@ function QaSessionDrawer({
   onOpenSettings,
   onRenameRequest,
 }: {
+  open: boolean;
   sessions: QaSession[];
   activeId: string | null;
   onSelect: (id: string) => void;
@@ -452,13 +454,14 @@ function QaSessionDrawer({
 }) {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
 
-  // 置顶的排最前，其余保持时间序。只在渲染层排，存储顺序不动
+  // 抽屉未打开时不重排也不挂载 30 个会话 DOM，避免流式输出每次 updateSession 都触发后台列表重绘
   const sortedSessions = useMemo(() => {
+    if (!open) return [];
     return [...sessions].sort((a, b) => {
       if (Boolean(a.isPinned) !== Boolean(b.isPinned)) return a.isPinned ? -1 : 1;
       return b.updatedAt - a.updatedAt;
     });
-  }, [sessions]);
+  }, [open, sessions]);
 
   return (
     <aside className="qa-drawer">
@@ -552,7 +555,7 @@ function QaSessionDrawer({
       </div>
     </aside>
   );
-}
+});
 
 // ── 工坊配置面板 ─────────────────────────────────────
 
@@ -908,7 +911,8 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
     [previewItem],
   );
 
-  // 自动滚动：用户上滚阅读时不拉回底部
+  // 自动滚动：用户上滚阅读时不拉回底部；合并到 animationFrame 执行，避免流式期间高频同步 Reflow
+  const scrollRafRef = useRef<number | null>(null);
   const handleScroll = useCallback(() => {
     const el = bodyRef.current;
     if (!el) return;
@@ -916,11 +920,22 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
   }, []);
 
   useEffect(() => {
-    const el = bodyRef.current;
-    if (el && stickToBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
+    if (!stickToBottomRef.current) return;
+    if (scrollRafRef.current != null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const el = bodyRef.current;
+      if (el && stickToBottomRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
   }, [messages]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current);
+    };
+  }, []);
 
   const autoGrow = useCallback(() => {
     const el = textareaRef.current;
@@ -1052,6 +1067,7 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
   return (
     <div className="qa-app-shell">
       <QaSessionDrawer
+        open={drawerOpen}
         sessions={snapshot.sessions}
         activeId={snapshot.activeSessionId}
         onSelect={(id) => {

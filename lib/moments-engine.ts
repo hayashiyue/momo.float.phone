@@ -1446,6 +1446,9 @@ function stopReactionPoll() {
 }
 
 function pollPendingReactions() {
+    // Skip heavy LLM & image snapshot generation while app is in background to prevent iOS Jetsam OOM
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+
     // Check scheduled posts
     pollScheduledPosts();
 

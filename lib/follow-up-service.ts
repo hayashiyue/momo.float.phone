@@ -353,7 +353,7 @@ async function saveBackgroundCompletionRounds(
     currentCount: number,
     followUpIndex: number | undefined,
     contextMessages: ChatMessage[],
-    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean },
+    options?: { senderCharacterId?: string; senderName?: string; silent?: boolean; createdAt?: string },
 ): Promise<{ hasVisible: boolean; newCount: number; stateValues: StateValue[] }> {
     let hasVisible = false;
     let newCount = currentCount;
@@ -808,12 +808,18 @@ async function fireMenstrualPeriodCare(input: {
             return;
         }
 
+        const today930 = new Date();
+        today930.setHours(9, 30, 0, 0);
+        const scheduledCreatedAt = today930.getTime() <= Date.now()
+            ? today930.toISOString()
+            : undefined;
         const { hasVisible, stateValues } = await saveBackgroundCompletionRounds(
             rounds,
             session.id,
             0,
             undefined,
             latestMessages,
+            scheduledCreatedAt ? { createdAt: scheduledCreatedAt } : undefined,
         );
         saveMenstrualPeriodCareTrigger({
             characterId: input.characterId,

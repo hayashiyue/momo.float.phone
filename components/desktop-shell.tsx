@@ -1985,15 +1985,15 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
     };
   }, [desktopReady]);
 
-  // iOS Safari 从后台切回前台时，WebKit 偶发回收毛玻璃/壁纸合成层纹理导致黑屏，强制唤醒一次合成器重绘
+  // iOS Safari 从后台切回前台时，切勿对整棵 .phone-shell 根节点做 translateZ(0)（会迫使 WebKit 在回前台瞬间为整屏所有子元素重建巨幅 GPU 合成纹理，直接触发 Jetsam OOM 瞬间闪退）；仅对轻量状态栏做 opacity 微抖动唤醒重绘
   useEffect(() => {
     const repaintOnResume = () => {
       if (document.visibilityState !== "visible") return;
-      const shell = shellRef.current;
-      if (!shell) return;
-      shell.style.transform = "translateZ(0)";
+      const bar = shellRef.current?.querySelector<HTMLElement>(".status-bar");
+      if (!bar) return;
+      bar.style.opacity = "0.999";
       requestAnimationFrame(() => {
-        if (shellRef.current) shellRef.current.style.transform = "";
+        bar.style.opacity = "";
       });
     };
     document.addEventListener("visibilitychange", repaintOnResume);

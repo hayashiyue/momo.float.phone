@@ -35,6 +35,7 @@ export function loadTimedWakeSchedules(): TimedWakeSchedule[] {
 function saveTimedWakeSchedules(schedules: TimedWakeSchedule[]): void {
     if (typeof window === "undefined") return;
     kvSet(TIMED_WAKE_SCHEDULES_KEY, JSON.stringify(schedules));
+    window.dispatchEvent(new CustomEvent("timed-wake-schedules-updated"));
 }
 
 export function saveTimedWakeSchedule(schedule: TimedWakeSchedule): void {

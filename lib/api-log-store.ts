@@ -45,16 +45,50 @@ const QA_LOGS_KEY = "ai_phone_qa_api_logs_v1";
 registerKvMigration(API_LOGS_KEY);
 registerKvMigration(QA_LOGS_KEY);
 
+const _logsMemoryCache = new Map<string, DebugInfo[]>();
+const _flushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 function _loadLogs(key: string): DebugInfo[] {
+    const cached = _logsMemoryCache.get(key);
+    if (cached) return cached.slice();
     try {
         const raw = typeof window !== "undefined" ? kvGet(key) : null;
-        if (!raw) return [];
+        if (!raw) {
+            _logsMemoryCache.set(key, []);
+            return [];
+        }
         const parsed: unknown = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed as DebugInfo[] : [];
+        const list = Array.isArray(parsed) ? parsed as DebugInfo[] : [];
+        _logsMemoryCache.set(key, list);
+        return list.slice();
     } catch { return []; }
 }
+
 function _saveLogs(key: string, logs: DebugInfo[]): void {
-    try { kvSet(key, JSON.stringify(logs)); } catch { /* 日志失败不影响主流程 */ }
+    _logsMemoryCache.set(key, logs);
+    const prevTimer = _flushTimers.get(key);
+    if (prevTimer) clearTimeout(prevTimer);
+    if (typeof window === "undefined") {
+        try { kvSet(key, JSON.stringify(logs)); } catch { }
+        return;
+    }
+    const timer = setTimeout(() => {
+        _flushTimers.delete(key);
+        const current = _logsMemoryCache.get(key);
+        if (!current) return;
+        try { kvSet(key, JSON.stringify(current)); } catch { /* 日志失败不影响主流程 */ }
+    }, 400);
+    _flushTimers.set(key, timer);
+}
+
+function _clearLogsKey(key: string): void {
+    const prevTimer = _flushTimers.get(key);
+    if (prevTimer) {
+        clearTimeout(prevTimer);
+        _flushTimers.delete(key);
+    }
+    _logsMemoryCache.set(key, []);
+    try { kvRemove(key); } catch { }
 }
 
 function truncateForLog(text: string, limit: number): string {
@@ -124,11 +158,11 @@ function trimLogsForStorage(logs: DebugInfo[], maxCount: number, maxSerializedCh
 }
 
 export function getApiLogs(): DebugInfo[] { return _loadLogs(API_LOGS_KEY); }
-export function clearApiLogs(): void { try { kvRemove(API_LOGS_KEY); } catch { } }
+export function clearApiLogs(): void { _clearLogsKey(API_LOGS_KEY); }
 
 /** 工坊专用调用记录（仅工坊 UI 读取，与底层日志完全隔离）。 */
 export function getQaApiLogs(): DebugInfo[] { return _loadLogs(QA_LOGS_KEY); }
-export function clearQaApiLogs(): void { try { kvRemove(QA_LOGS_KEY); } catch { } }
+export function clearQaApiLogs(): void { _clearLogsKey(QA_LOGS_KEY); }
 
 /** 追加一条调用日志（id/timestamp 自动生成、超限文本截断），超出数量/体积上限时裁掉最旧的记录。 */
 export function pushApiLog(entry: Omit<DebugInfo, "id" | "timestamp">): void {

@@ -292,6 +292,12 @@ export function installServerOutboxConsumer(): void {
     document.addEventListener("visibilitychange", () => {
         if (!document.hidden) requestConsume(true);
     });
+    window.addEventListener("pageshow", () => {
+        if (typeof document === "undefined" || !document.hidden) requestConsume(true);
+    });
+    window.addEventListener("focus", () => {
+        if (typeof document === "undefined" || !document.hidden) requestConsume(true);
+    });
     navigator.serviceWorker?.addEventListener("message", (event) => {
         if (event.data?.type === "push_outbox_ready") {
             requestConsume(true);

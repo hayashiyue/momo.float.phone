@@ -376,6 +376,7 @@ async function liftPersonalBridgeDailyCap(cloudConfig: { url: string; key: strin
 
 async function runSync(): Promise<void> {
     if (syncing || typeof window === "undefined") return;
+    if (typeof document !== "undefined" && document.hidden) return;
     syncing = true;
     try {
         const settings = loadBridgeSettings();

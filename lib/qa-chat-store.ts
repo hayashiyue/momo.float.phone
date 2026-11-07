@@ -561,9 +561,19 @@ export function editAndResendQaMessage(
 }
 
 function updateSession(sessionId: string, updater: (session: QaSession) => QaSession, options?: { persist?: boolean }) {
-    sessions = sessions
-        .map((s) => (s.id === sessionId ? updater(s) : s))
-        .sort((a, b) => b.updatedAt - a.updatedAt);
+    const idx = sessions.findIndex((s) => s.id === sessionId);
+    if (idx < 0) return;
+    const prev = sessions[idx];
+    const next = updater(prev);
+    if (next === prev) return;
+    const nextSessions = sessions.slice();
+    nextSessions[idx] = next;
+    // Fast path: if already at index 0 and updatedAt >= prev.updatedAt, or updatedAt didn't change, order is preserved
+    const prevNeighborOk = idx === 0 || nextSessions[idx - 1].updatedAt >= next.updatedAt;
+    const nextNeighborOk = idx === nextSessions.length - 1 || next.updatedAt >= nextSessions[idx + 1].updatedAt;
+    sessions = prevNeighborOk && nextNeighborOk
+        ? nextSessions
+        : nextSessions.sort((a, b) => b.updatedAt - a.updatedAt);
     publish(options);
 }
 

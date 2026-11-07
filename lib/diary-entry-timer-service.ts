@@ -69,6 +69,7 @@ function stampAttemptedCharacters(characterIds: string[], stamp: string): void {
 
 export async function runDiaryEntryTimerCheck(): Promise<void> {
   if (typeof window === "undefined" || running) return;
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
 
   const settings = loadDiaryEntryTimerSettings();
   const dueTargets = getDueTargets(settings);
