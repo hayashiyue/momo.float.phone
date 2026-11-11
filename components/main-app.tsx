@@ -271,18 +271,21 @@ export function MainApp() {
       }
       setKvHydrateFailed(false);
 
-      let nextPreparedTheme: PreparedDesktopTheme | null = null;
-      try {
-        nextPreparedTheme = await prepareDesktopThemeForFirstPaint();
-      } catch (error) {
-        console.warn("[MainApp] desktop theme preload failed:", error);
-      }
-
       if (cancelled) return;
-      setPreparedDesktopTheme(nextPreparedTheme);
+      // 先放行进入，再做首屏主题预取：DesktopShell 只有在用户点「进入」后才会挂载，
+      // 把 hydrated 卡在主题预取后面等于白白多堵 240~600ms（冷启动叠加 KV 水合后
+      // 表现为「等半天进不去」）。预取完成后再补一次状态，赶在用户点进入前生效。
       setHydrated(true);
       if (hasPendingMcpOAuthCallback()) {
         setSplashDismissed(true);
+      }
+
+      try {
+        const nextPreparedTheme = await prepareDesktopThemeForFirstPaint();
+        if (cancelled) return;
+        setPreparedDesktopTheme(nextPreparedTheme);
+      } catch (error) {
+        console.warn("[MainApp] desktop theme preload failed:", error);
       }
     })();
 

@@ -318,6 +318,10 @@ const CHAT_BG_COMPLETE = "chat-bg-complete";
 const CHAT_OFFLINE_MODE_PREFIX = "chat-offline-mode:";
 const CHAT_THEATER_MODE_PREFIX = "chat-theater-mode:";
 const GENERATING_LOCK_TTL_MS = 5 * 60 * 1000;
+// 流式预览的最小刷新间隔：预览每帧都要对全部累积文本跑一遍 cleanStreamText（十余条正则），
+// 长回复时 60fps 的全文正则扫描足以把主线程占满，iOS 会判定 WebProcess 无响应直接杀掉。
+// 80ms（约 12fps）在观感上仍是连续打字，却把正则开销降到 1/5。
+const STREAM_PREVIEW_MIN_INTERVAL_MS = 80;
 const OFFLINE_INITIAL_LOAD = 10;
 const OFFLINE_LOAD_MORE_COUNT = 10;
 
@@ -1142,6 +1146,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
     const offlineStreamAccumRef = useRef("");
     // 群聊/单聊流式预览解析的 rAF 合并帧（限频：一帧最多解析一次全文）
     const streamParseFrameRef = useRef(0);
+    // 上一次真正提交预览的时间戳：与 rAF 一起做双重限频（见 STREAM_PREVIEW_MIN_INTERVAL_MS）
+    const streamPreviewRenderedAtRef = useRef(0);
     // 线下模式流式预览解析的 rAF 合并帧（独立于线上，避免互相干扰）
     const offlineStreamFrameRef = useRef(0);
     const [activeOfflineTarget, setActiveOfflineTarget] = useState<OfflineActionTarget | null>(null);
@@ -3823,11 +3829,13 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
                         if (!isChatRoomElementVisible(wrapperRef.current)) return;
-                        // 群聊全文解析较重：合并到 rAF 下一帧执行，避免一帧多段增量重复解析
+                        // 群聊全文解析更重：rAF 合并 + 最小间隔双重限频（与单聊一致）
                         if (streamParseFrameRef.current) return;
+                        if (Date.now() - streamPreviewRenderedAtRef.current < STREAM_PREVIEW_MIN_INTERVAL_MS) return;
                         streamParseFrameRef.current = window.requestAnimationFrame(() => {
                             streamParseFrameRef.current = 0;
                             if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
+                            streamPreviewRenderedAtRef.current = Date.now();
                             const nameToId = new Map(groupCharacters.map(item => [item.name, item.id]));
                             const rawParts = parseGroupChatResponse(streamAccumRef.current, nameToId);
                             const parts = rawParts
@@ -4000,11 +4008,14 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
                         if (!isChatRoomElementVisible(wrapperRef.current)) return;
-                        // 预览更新合并到 rAF 下一帧：每帧最多一次全文净化+setState，避免高频增量卡顿
+                        // 双重限频：rAF 合并同帧增量，再用 STREAM_PREVIEW_MIN_INTERVAL_MS 丢掉过密的帧。
+                        // 被丢掉的增量不会丢内容——它已经累加进 streamAccumRef，下一帧一起渲染。
                         if (streamParseFrameRef.current) return;
+                        if (Date.now() - streamPreviewRenderedAtRef.current < STREAM_PREVIEW_MIN_INTERVAL_MS) return;
                         streamParseFrameRef.current = window.requestAnimationFrame(() => {
                             streamParseFrameRef.current = 0;
                             if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
+                            streamPreviewRenderedAtRef.current = Date.now();
                             setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                         });
                     },
@@ -5655,6 +5666,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         const displayContents = new Array<string>(projectedMessages.length);
         const hiddenFlags = new Array<boolean>(projectedMessages.length);
         const prevVisibleMessages = new Array<RenderChatMessage | null>(projectedMessages.length);
+        // 这两项原本在渲染 map 里逐条算：流式生成时每推一次预览都会让整个列表重渲染，
+        // 而 normalizeTextBubbleContent / isStandaloneHtmlPreviewContent 各自要跑多条正则 + 全文拆分，
+        // 会话越长每帧开销越大，最终把主线程占满（iOS 判定进程无响应直接杀）。
+        // projectedMessages 在生成期间是不变的，这里一次算完缓存起来。
+        const flowVisibleContents = new Array<string>(projectedMessages.length);
+        const htmlPreviewFlags = new Array<boolean>(projectedMessages.length);
         let lastVisible: RenderChatMessage | null = null;
 
         for (let i = 0; i < projectedMessages.length; i += 1) {
@@ -5662,6 +5679,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
             if (voiceCallGroups.memberSet.has(i)) {
                 displayContents[i] = "";
                 hiddenFlags[i] = true;
+                flowVisibleContents[i] = "";
+                htmlPreviewFlags[i] = false;
                 continue;
             }
             const msg = projectedMessages[i];
@@ -5669,12 +5688,14 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
             const hidden = isHiddenChatFlowMessage(msg, content);
             displayContents[i] = content;
             hiddenFlags[i] = hidden;
+            flowVisibleContents[i] = getChatFlowVisibleContent(msg, content);
+            htmlPreviewFlags[i] = !msg.mediaType && isStandaloneHtmlPreviewContent(content);
             if (!hidden) {
                 lastVisible = msg;
             }
         }
 
-        return { displayContents, hiddenFlags, prevVisibleMessages };
+        return { displayContents, hiddenFlags, prevVisibleMessages, flowVisibleContents, htmlPreviewFlags };
     }, [getMessageDisplayContent, projectedMessages, voiceCallGroups.memberSet]);
 
     const visibleSelectableMessageIds = useMemo(() => {
@@ -6247,14 +6268,15 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                     const isConsecutive = prevVisibleMsg && !showTime && uiRole(prevVisibleMsg) === uiRole(msg) && uiRole(msg) !== "system"
                         && (!session.isGroup || prevVisibleMsg.senderCharacterId === msg.senderCharacterId);
                     // Hide bubbles with no visible content (empty text, stripped music tags, etc.)
-                    const visibleContent = getChatFlowVisibleContent(renderMsg, bubbleDisplayContent);
+                    // 读 projectedMessageRenderMeta 的预计算结果，避免流式每帧对每条消息重跑全文正则
+                    const visibleContent = projectedMessageRenderMeta.flowVisibleContents[idx] ?? getChatFlowVisibleContent(renderMsg, bubbleDisplayContent);
                     const isVisualMedia = isChatVisualMedia(renderMsg);
                     const hiddenEmpty = projectedMessageRenderMeta.hiddenFlags[idx] ?? isHiddenChatFlowMessage(renderMsg, bubbleDisplayContent);
                     const hasFoldedPanel = !!(renderMsg.statusPanel || renderMsg.innerMonologue);
                     // 内心卡片只展示本轮实际输出的状态值；旧数据没有 freshStateValues 时回退到合并快照
                     const cardStateValues = msg.freshStateValues ?? msg.stateValues;
                     const isSilentThought = !visibleContent && !renderMsg.mediaType && hasFoldedPanel && msg.role !== "user";
-                    const isStandaloneHtmlPreview = !renderMsg.mediaType && isStandaloneHtmlPreviewContent(bubbleDisplayContent);
+                    const isStandaloneHtmlPreview = projectedMessageRenderMeta.htmlPreviewFlags[idx] ?? (!renderMsg.mediaType && isStandaloneHtmlPreviewContent(bubbleDisplayContent));
                     const isMediaBubble = (renderMsg.mediaType && CHAT_MEDIA_BUBBLE_TYPES.has(renderMsg.mediaType)) || isStandaloneHtmlPreview;
                     // Empty bubble: no visible content AND no visual media AND no folded panel.
                     const isEmptyBubble = !isVisualMedia && !visibleContent && uiRole(msg) !== "system" && !hasFoldedPanel;

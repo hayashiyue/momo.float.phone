@@ -119,15 +119,21 @@ export function hydrateKvDb(): Promise<void> {
     if (_hydrated || typeof window === "undefined") return Promise.resolve();
     if (_hydratePromise) return _hydratePromise;
     _hydratePromise = (async () => {
-        // Load existing IDB data into cache (chunked to yield main thread on large stores)
-        const all = await kvDb.entries.toArray();
+        // 游标分批读取：原实现先 kvDb.entries.toArray() 把整张表读进内存，再「分片让出」——
+        // 让出的只是 set 循环，真正的全量反序列化仍然是一次性的，条目越多冷启动内存峰值
+        // 和主线程阻塞越严重（表现为开屏长时间白屏，低内存设备上还会抬高后续生成闪退概率）。
+        // 改为每批 HYDRATE_CHUNK_SIZE 条读一次、立刻写进缓存、再让出主线程，峰值只剩一批。
         const HYDRATE_CHUNK_SIZE = 250;
-        for (let i = 0; i < all.length; i++) {
-            const { key, value } = all[i];
-            if (!_cache.has(key)) _cache.set(key, value);
-            if ((i + 1) % HYDRATE_CHUNK_SIZE === 0 && i + 1 < all.length) {
-                await new Promise<void>(resolve => setTimeout(resolve, 0));
+        let offset = 0;
+        while (true) {
+            const batch = await kvDb.entries.offset(offset).limit(HYDRATE_CHUNK_SIZE).toArray();
+            if (batch.length === 0) break;
+            for (const { key, value } of batch) {
+                if (!_cache.has(key)) _cache.set(key, value);
             }
+            offset += batch.length;
+            if (batch.length < HYDRATE_CHUNK_SIZE) break;
+            await new Promise<void>(resolve => setTimeout(resolve, 0));
         }
 
         // Migrate from localStorage
