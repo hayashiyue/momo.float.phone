@@ -68,29 +68,46 @@ function ensureAudioCreated() {
     _keepAliveAudio.src = URL.createObjectURL(blob);
     _keepAliveAudio.loop = true;
     _keepAliveAudio.volume = 0.01;
+    // 被系统 / 其他有声 App 抢占音频会话后，静音音频会静默变 paused 且不再有回调。
+    // 只靠「切回前台用户触摸」兜底会漏掉长时间留在后台的场景（打断后没人点就永远死了）。
+    // 这里挂事件级自愈：只要还想保活且不在通话中，一被打断立即尝试续播。
+    const tryResume = () => {
+        if (!_keepAliveWanted || _suspendedForCall || !_keepAliveAudio) return;
+        if (!_keepAliveAudio.paused) return;
+        _keepAliveAudio.play().catch(() => {});
+    };
+    _keepAliveAudio.addEventListener("pause", tryResume);
+    _keepAliveAudio.addEventListener("ended", tryResume);
+    _keepAliveAudio.addEventListener("stalled", tryResume);
+    _keepAliveAudio.addEventListener("suspend", tryResume);
 }
 
 /** 用户触摸时尝试播放（浏览器要求音频必须在用户手势中启动） */
 function onUserGesture() {
     if (!_keepAliveWanted || _suspendedForCall || !_keepAliveAudio) return;
-    if (!_keepAliveAudio.paused) {
-        document.removeEventListener("pointerdown", onUserGesture, true);
-        document.removeEventListener("touchstart", onUserGesture, true);
-        document.removeEventListener("click", onUserGesture, true);
-        return;
-    }
-    _keepAliveAudio.play().then(() => {
-        // 成功了，移除监听
-        document.removeEventListener("pointerdown", onUserGesture, true);
-        document.removeEventListener("touchstart", onUserGesture, true);
-        document.removeEventListener("click", onUserGesture, true);
-    }).catch(() => {});
+    // 播放中不做任何事，且不得摘除监听：iOS 会反复打断音频会话，
+    // 摘掉监听会导致后面几次打断再也无法通过触摸恢复（保活彻底死掉）。
+    if (!_keepAliveAudio.paused) return;
+    _keepAliveAudio.play().catch(() => {});
 }
 
+let _gestureListenersAttached = false;
+
+/** 常驻挂载手势恢复监听（幂等，重复调用不会重复绑定） */
 function armGestureRestore() {
+    if (_gestureListenersAttached) return;
+    _gestureListenersAttached = true;
     document.addEventListener("pointerdown", onUserGesture, { capture: true, once: false });
     document.addEventListener("touchstart", onUserGesture, { capture: true, once: false });
     document.addEventListener("click", onUserGesture, { capture: true, once: false });
+}
+
+function disarmGestureRestore() {
+    if (!_gestureListenersAttached) return;
+    _gestureListenersAttached = false;
+    document.removeEventListener("pointerdown", onUserGesture, true);
+    document.removeEventListener("touchstart", onUserGesture, true);
+    document.removeEventListener("click", onUserGesture, true);
 }
 
 async function startKeepAlive() {
@@ -127,9 +144,7 @@ function stopKeepAlive() {
         _keepAliveAudio.pause();
         _keepAliveAudio.currentTime = 0;
     }
-    document.removeEventListener("pointerdown", onUserGesture, true);
-    document.removeEventListener("touchstart", onUserGesture, true);
-    document.removeEventListener("click", onUserGesture, true);
+    disarmGestureRestore();
 }
 
 /**
@@ -146,8 +161,8 @@ export function suspendKeepAliveForCall() {
     if (_keepAliveAudio) {
         try { _keepAliveAudio.pause(); } catch {}
     }
-    document.removeEventListener("touchstart", onUserGesture, true);
-    document.removeEventListener("click", onUserGesture, true);
+    // 通话期间不摘手势监听：保留常驻幂等监听，避免通话结束后少挂一个 pointerdown 导致恢复不全
+    disarmGestureRestore();
 }
 
 /** Re-arm keep-alive after a call ends, unless the user turned it off meanwhile. */

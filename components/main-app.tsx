@@ -218,7 +218,11 @@ function preloadImageDataUrl(url: string): Promise<void> {
   });
 }
 
-const FIRST_PAINT_PRELOAD_TIMEOUT_MS = 1500;
+// 首屏只读一次 KV 资产 + 预解码壁纸，限时 600ms 快速放行；
+// 原来 1500ms 在冷启动时叠加账号校验与 KV 水合，会表现为长时间白屏。
+const FIRST_PAINT_PRELOAD_TIMEOUT_MS = 600;
+// 壁纸解码单独再限时 240ms：大图 decode 在低端机可能耗秒级，不能让它独吞整个首屏预算。
+const WALLPAPER_DECODE_TIMEOUT_MS = 240;
 
 async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme> {
   const profile = readThemeProfile();
@@ -227,7 +231,15 @@ async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme>
   await Promise.race([
     (async () => {
       assets = assetIds.length ? await getThemeAssetMap(assetIds) : {};
-      await Promise.all(Object.values(assets).map(preloadImageDataUrl));
+      // 只预解码壁纸：图标皮肤 / 字体 / Dock 皮肤的 data URL 交给浏览器按需解码。
+      // 原来是对全部资产逐个 await decode()，冷启动时会额外等数百毫秒到数秒（白屏主因之一）。
+      const wallpaperUrl = profile.wallpaperAssetId ? assets[profile.wallpaperAssetId] : undefined;
+      if (!wallpaperUrl) return;
+      // 壁纸解码自身再限时：大图 decode 在低端机可能耗时秒级，不能独吞整个首屏预算。
+      await Promise.race([
+        preloadImageDataUrl(wallpaperUrl),
+        new Promise<void>((resolve) => window.setTimeout(resolve, WALLPAPER_DECODE_TIMEOUT_MS)),
+      ]);
     })(),
     new Promise<void>((resolve) => window.setTimeout(resolve, FIRST_PAINT_PRELOAD_TIMEOUT_MS)),
   ]);

@@ -228,14 +228,66 @@ async function fetchRemoteImageBlob(url: string): Promise<Blob | null> {
     }
 }
 
+// ── 图片压缩结果缓存（有界 LRU）──
+// 每次点生成都会对提示词历史里每条含图消息走一遍「读 IDB → atob → new Image 解码 →
+// Canvas 缩放 → toBlob → 再编码 base64」。同一条历史图片每轮生成都重做一次，
+// 多张图连做时内存峰值叠加，在 iOS WebKit 上直接触发 Jetsam 闪退（表现为生成时闪退重启）。
+// 这里按图片引用指纹缓存压缩结果，容量有界防止 base64 常驻内存反过来撑爆。
+const _visionCacheMax = 12;
+const _visionCache = new Map<string, string>();
+
+function visionCacheKey(imageRef: string): string {
+    // data URL 可能长达数百 KB，不能整串做 key（等于把图再存一份）。
+    // 用长度 + 头尾片段做指纹，同引用必同结果，不同引用极难碰撞。
+    if (imageRef.length <= 256) return imageRef;
+    return `${imageRef.length}:${imageRef.slice(0, 128)}:${imageRef.slice(-96)}`;
+}
+
+function getVisionCache(imageRef: string): string | undefined {
+    const key = visionCacheKey(imageRef);
+    const hit = _visionCache.get(key);
+    if (hit === undefined) return undefined;
+    // LRU 提升
+    _visionCache.delete(key);
+    _visionCache.set(key, hit);
+    return hit;
+}
+
+function putVisionCache(imageRef: string, dataUrl: string): void {
+    const key = visionCacheKey(imageRef);
+    if (!_visionCache.has(key) && _visionCache.size >= _visionCacheMax) {
+        const oldest = _visionCache.keys().next().value;
+        if (oldest !== undefined) _visionCache.delete(oldest);
+    }
+    _visionCache.set(key, dataUrl);
+}
+
+/** 已是小体积 jpeg data URL 时无需再解码重压，直接复用（省一次 atob + Canvas）。 */
+const SMALL_JPEG_REUSE_LIMIT = 180_000;
+function isAlreadyCompactJpeg(imageRef: string): boolean {
+    return /^data:image\/jpe?g;base64,/i.test(imageRef) && imageRef.length <= SMALL_JPEG_REUSE_LIMIT;
+}
+
 export async function resolveCompressedImageDataUrl(imageRef: string): Promise<string | null> {
+    const cached = getVisionCache(imageRef);
+    if (cached !== undefined) return cached;
+
     if (isMediaStoreRef(imageRef)) {
         const result = await loadMediaBlob(imageRef);
-        return result ? readCompressedImageDataUrl(result.blob) : null;
+        if (!result) return null;
+        const compressed = await readCompressedImageDataUrl(result.blob);
+        if (compressed) putVisionCache(imageRef, compressed);
+        return compressed;
     }
     if (imageRef.startsWith("data:image/")) {
+        if (isAlreadyCompactJpeg(imageRef)) {
+            putVisionCache(imageRef, imageRef);
+            return imageRef;
+        }
         const blob = dataUrlToBlob(imageRef);
-        return blob ? readCompressedImageDataUrl(blob) : imageRef;
+        const compressed = blob ? await readCompressedImageDataUrl(blob) : imageRef;
+        if (compressed) putVisionCache(imageRef, compressed);
+        return compressed;
     }
     return imageRef;
 }
@@ -246,24 +298,37 @@ type VisionImageResolveResult =
     | { keep: true };
 
 async function resolveVisionImageRefForApi(imageRef: string): Promise<VisionImageResolveResult> {
+    const cached = getVisionCache(imageRef);
+    if (cached !== undefined) return { url: cached };
+
     if (isMediaStoreRef(imageRef)) {
         const result = await loadMediaBlob(imageRef);
         if (!result) return { keep: true };
         if (isGifMimeType(result.mimeType) || isGifMimeType(result.blob.type)) {
             const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(result.blob);
+            if (staticDataUrl) putVisionCache(imageRef, staticDataUrl);
             return staticDataUrl ? { url: staticDataUrl } : { drop: true };
         }
-        return { url: await readCompressedImageDataUrl(result.blob) };
+        const compressed = await readCompressedImageDataUrl(result.blob);
+        if (compressed) putVisionCache(imageRef, compressed);
+        return { url: compressed };
     }
 
     if (imageRef.startsWith("data:image/")) {
+        if (isAlreadyCompactJpeg(imageRef)) {
+            putVisionCache(imageRef, imageRef);
+            return { url: imageRef };
+        }
         const blob = dataUrlToBlob(imageRef);
         if (!blob) return { keep: true };
         if (isGifMimeType(getImageRefMimeType(imageRef)) || isGifMimeType(blob.type)) {
             const staticDataUrl = await rasterizeImageBlobToJpegDataUrl(blob);
+            if (staticDataUrl) putVisionCache(imageRef, staticDataUrl);
             return staticDataUrl ? { url: staticDataUrl } : { drop: true };
         }
-        return { url: await readCompressedImageDataUrl(blob) };
+        const compressed = await readCompressedImageDataUrl(blob);
+        if (compressed) putVisionCache(imageRef, compressed);
+        return { url: compressed };
     }
 
     try {
