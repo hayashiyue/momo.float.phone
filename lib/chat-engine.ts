@@ -1122,10 +1122,15 @@ export async function sendLLMRequest(
             throw new ChatEngineError(emptyDetails.message);
         }
 
-        // Store API log entry (strip base64 image data to avoid bloating localStorage)
+        // Store API log entry (strip base64 image data & cap huge system prompts to avoid OOM in iOS WebKit)
+        const LOG_MSG_MAX_CHARS = 12_000;
         const sanitizedMessages = request.messagesForLog.map(m => ({
             ...m,
-            content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
+            content: typeof m.content === "string"
+                ? (m.content.length > LOG_MSG_MAX_CHARS
+                    ? `${m.content.slice(0, 8_000)}\n...[日志已截断 ${m.content.length - 11_000} 字符以防内存溢出]...\n${m.content.slice(-3_000)}`
+                    : m.content)
+                : "[vision: 含图片的多模态消息]",
         }));
         pushApiLog({
             characterName: meta?.characterName,
@@ -2736,6 +2741,11 @@ async function generateChatCompletionCore(
     bailoutRef: ReplyBailoutRef,
 ): Promise<ChatCompletionResult> {
     const { llmMessages, character, config, preset, regexes, userIdentity, toolsEnabled } = await buildChatPromptMessages(session, history, options);
+    // 装配完完整上下文（世界书+短期记忆+输入正则）后立即让出一帧：
+    // 1) 让 iOS WebKit 主线程响应触摸，避免「点生成后画面死锁动不了」；
+    // 2) 让 JSC 垃圾回收器在进入 buildProviderRequest (JSON.stringify) 前回收装配阶段产生的数 MB 临时字符串。
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    throwIfAborted(options?.signal);
     const requestAppTags = mergeAppTags(options?.appTags, options?.promptProfile?.appTags, options?.appId ?? "chat");
 
     // 追问有自己的排期时兜底（followup:key），这里只为普通回复生成挂单。
@@ -2762,10 +2772,14 @@ async function generateChatCompletionCore(
         // 静默丢掉离线回复——为了第二轮续跑赔掉第一轮，不划算。冷场重连与定时
         // 唤醒是低频任务，那两条照常挂续跑。
         void import("./push-bailout-client").then(async mod => {
-            await new Promise(r => setTimeout(r, 6000));
+            // 延后到 15 秒再挂云端兜底：非流式请求在前 6~10 秒正处于主请求刚序列化发出、
+            // JSC 尚未完成大对象回收的高峰期，过早克隆 llmMessages 并二次 buildProviderRequest
+            // 会让两份数百 KB 的请求体同时驻留内存，在 iOS WebKit 上直接触发 Jetsam 崩溃。
+            await new Promise(r => setTimeout(r, 15000));
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
             if (!(await mod.canArmReplyBailout())) return;
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
+            await new Promise<void>(r => setTimeout(r, 0));
             const bailoutMessages = llmMessages.map(m => (
                 Array.isArray(m.content)
                     ? { ...m, content: m.content.map(p => p.type === "text" ? p.text : "[图片]").filter(Boolean).join("\n") }

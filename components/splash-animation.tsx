@@ -1,6 +1,6 @@
 "use client";
 
-import { useLayoutEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 const SCRIPT = [
   { side: "right", text: "you ever zone out mid-toast?", start: 80, type: 0 },
@@ -77,7 +77,7 @@ export function SplashAnimation() {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  useLayoutEffect(() => {
+  useEffect(() => {
     const stageEl = stageRef.current;
     const canvasEl = canvasRef.current;
     const context = canvasEl?.getContext("2d");

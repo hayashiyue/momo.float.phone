@@ -124,14 +124,16 @@ export function hydrateKvDb(): Promise<void> {
         // 和主线程阻塞越严重（表现为开屏长时间白屏，低内存设备上还会抬高后续生成闪退概率）。
         // 改为每批 HYDRATE_CHUNK_SIZE 条读一次、立刻写进缓存、再让出主线程，峰值只剩一批。
         const HYDRATE_CHUNK_SIZE = 250;
-        let offset = 0;
+        let lastKey: string | undefined = undefined;
         while (true) {
-            const batch = await kvDb.entries.offset(offset).limit(HYDRATE_CHUNK_SIZE).toArray();
+            const batch: { key: string; value: string }[] = lastKey === undefined
+                ? await kvDb.entries.limit(HYDRATE_CHUNK_SIZE).toArray()
+                : await kvDb.entries.where(":id").above(lastKey).limit(HYDRATE_CHUNK_SIZE).toArray();
             if (batch.length === 0) break;
             for (const { key, value } of batch) {
                 if (!_cache.has(key)) _cache.set(key, value);
             }
-            offset += batch.length;
+            lastKey = batch[batch.length - 1].key;
             if (batch.length < HYDRATE_CHUNK_SIZE) break;
             await new Promise<void>(resolve => setTimeout(resolve, 0));
         }
