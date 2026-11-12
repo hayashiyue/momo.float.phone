@@ -1,4 +1,12 @@
-const CACHE_VERSION = "ai-phone-pwa-v12";
+const CACHE_VERSION = "ai-phone-pwa-v13";
+const NAVIGATE_FETCH_TIMEOUT_MS = 3200;
+const ASSET_FETCH_TIMEOUT_MS = 12000;
+
+function fetchWithSwTimeout(request, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(request, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
@@ -45,7 +53,9 @@ function isCacheableRequest(request) {
 async function networkFirst(request) {
   const cache = await caches.open(RUNTIME_CACHE);
   try {
-    const response = await fetch(request);
+    // 首页 navigate 请求限时 3.2 秒：国内直连 Vercel 首包挂起时，无超时 fetch 会死等
+    // iOS CFNetwork 60 秒默认超时才落回 catch，导致开屏纯白屏整整 1 分钟。
+    const response = await fetchWithSwTimeout(request, NAVIGATE_FETCH_TIMEOUT_MS);
     if (response.ok) cache.put(request, response.clone());
     return response;
   } catch (error) {
@@ -65,7 +75,7 @@ async function cacheFirst(request) {
   const cache = await caches.open(RUNTIME_CACHE);
   const cached = await cache.match(request);
   if (cached) return cached;
-  const response = await fetch(request);
+  const response = await fetchWithSwTimeout(request, ASSET_FETCH_TIMEOUT_MS);
   if (response.ok) cache.put(request, response.clone());
   return response;
 }
