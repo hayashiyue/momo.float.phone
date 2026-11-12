@@ -1,6 +1,6 @@
-const CACHE_VERSION = "ai-phone-pwa-v13";
-const NAVIGATE_FETCH_TIMEOUT_MS = 3200;
-const ASSET_FETCH_TIMEOUT_MS = 12000;
+const CACHE_VERSION = "ai-phone-pwa-v14";
+const NAVIGATE_FETCH_TIMEOUT_MS = 1800;
+const ASSET_FETCH_TIMEOUT_MS = 8000;
 
 function fetchWithSwTimeout(request, timeoutMs) {
   const controller = new AbortController();
@@ -10,9 +10,11 @@ function fetchWithSwTimeout(request, timeoutMs) {
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
 
+// 注意：本项目实际使用的是 /manifest.webmanifest（见 app/layout.tsx），
+// 此前写 /manifest.json 会 404 导致 cache.addAll 整批失败、"/" 根本没存进预缓存！
 const PRECACHE_URLS = [
   "/",
-  "/manifest.json",
+  "/manifest.webmanifest",
   "/icon-192.png",
   "/icon-512.png",
 ];
@@ -20,7 +22,7 @@ const PRECACHE_URLS = [
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(STATIC_CACHE)
-      .then((cache) => cache.addAll(PRECACHE_URLS))
+      .then((cache) => Promise.allSettled(PRECACHE_URLS.map((url) => cache.add(url))))
       .then(() => self.skipWaiting())
   );
 });
@@ -52,17 +54,16 @@ function isCacheableRequest(request) {
 
 async function networkFirst(request) {
   const cache = await caches.open(RUNTIME_CACHE);
+  // 优先查本地已有缓存（含忽略 search 参数的 "/" 兜底）：
+  // 只要本地有旧壳，最多等 1.8 秒网络；若连不上 Vercel 立即秒回本地缓存，后台静默更新。
+  const cached = (await cache.match(request, { ignoreSearch: true }))
+    || (await caches.match("/", { ignoreSearch: true }));
   try {
-    // 首页 navigate 请求限时 3.2 秒：国内直连 Vercel 首包挂起时，无超时 fetch 会死等
-    // iOS CFNetwork 60 秒默认超时才落回 catch，导致开屏纯白屏整整 1 分钟。
     const response = await fetchWithSwTimeout(request, NAVIGATE_FETCH_TIMEOUT_MS);
     if (response.ok) cache.put(request, response.clone());
     return response;
   } catch (error) {
-    const cached = await cache.match(request);
     if (cached) return cached;
-    const fallback = await caches.match("/");
-    if (fallback) return fallback;
     throw error;
   }
 }

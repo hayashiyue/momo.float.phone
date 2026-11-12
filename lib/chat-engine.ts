@@ -2016,6 +2016,8 @@ export async function buildChatPromptMessages(
         maxMessagesPerSession: memConfig.shortTermTokenBudget > 0 ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4))) : 800,
         allowedSources: memConfig.shortTermAllowedSources,
     });
+    // 时间线扫描后让出一帧，避免与后续短期记忆池排序及世界书正则堆在同一个长宏任务里卡死页面
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
     const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
         timeline,
         history: historyForPrompt,
@@ -2027,6 +2029,7 @@ export async function buildChatPromptMessages(
         userName: userIdentity?.name,
         promptTimestampOptions,
     });
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
     const promptHistory = applyVisionImagePromptLimit(
         truncatedHistory.map(msg => ({ ...msg })),
         resolveVisionImagePromptLimit(session),
@@ -2072,6 +2075,8 @@ export async function buildChatPromptMessages(
         )
         : "";
 
+    // 进入全量世界书激活 + 输入正则替换前再让出一帧，防止点生成后主线程连续卡顿数秒
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
     const llmMessages = assemblePromptPayload({
         character,
         history: promptHistory,
