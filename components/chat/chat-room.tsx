@@ -320,8 +320,10 @@ const CHAT_THEATER_MODE_PREFIX = "chat-theater-mode:";
 const GENERATING_LOCK_TTL_MS = 5 * 60 * 1000;
 // 流式预览的最小刷新间隔：预览每帧都要对全部累积文本跑一遍 cleanStreamText（十余条正则），
 // 长回复时 60fps 的全文正则扫描足以把主线程占满，iOS 会判定 WebProcess 无响应直接杀掉。
-// 80ms（约 12fps）在观感上仍是连续打字，却把正则开销降到 1/5。
-const STREAM_PREVIEW_MIN_INTERVAL_MS = 80;
+// 120ms（约 8fps）在观感上仍是连续打字，却把正则开销再降一档。
+// 流式期间每次 setStreamPreview 都会让整棵聊天室重渲染，低端机上 80ms 仍会
+// 把主线程占满——点「停止生成」的 click 宏任务排不进事件循环，看起来就是按钮点不动。
+const STREAM_PREVIEW_MIN_INTERVAL_MS = 120;
 const OFFLINE_INITIAL_LOAD = 10;
 const OFFLINE_LOAD_MORE_COUNT = 10;
 
@@ -2784,6 +2786,14 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
     };
 
     const clearStuckGeneration = () => {
+        // 先掐掉流式预览：不取消挂起的 rAF、不清 streamPreview，停止后那半截
+        // 预览气泡还会留在屏幕上，看起来就像「点了停止完全没反应」。
+        if (streamParseFrameRef.current) {
+            cancelAnimationFrame(streamParseFrameRef.current);
+            streamParseFrameRef.current = 0;
+        }
+        streamAccumRef.current = "";
+        setStreamPreview(null);
         const cancelledRun = cancelGenerationRun(session.id);
         cancelBackgroundGeneration(session.id);
         cancelBailoutKey(`reply:${session.id}`);
@@ -2806,8 +2816,10 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         setIsGenerating(false);
         clearGenerationLock(session.id);
         setPendingGenerate(true);
-        syncMessagesFromStorage();
         showChatToast("已停止本轮生成");
+        // 全量重读消息（loadChatMessages + 排序）会让长会话卡住当前帧；
+        // 放到下一帧，先让「停止」状态与提示完成绘制。
+        requestAnimationFrame(() => syncMessagesFromStorage());
     };
 
     const clearOfflineGeneration = () => {
@@ -3465,11 +3477,15 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
                             if (!isChatRoomElementVisible(wrapperRef.current)) return;
-                            // 群聊全文解析较重：合并到 rAF 下一帧执行，避免一帧多段增量重复解析
+                            // 群聊全文解析较重：rAF 合并 + 最小间隔双重限频（与单聊一致）。
+                            // 只靠 rAF 时相当于 60fps 每帧都对整段累积文本重跑
+                            // parseGroupChatResponse + cleanStreamText，主线程会被占满。
                             if (streamParseFrameRef.current) return;
+                            if (Date.now() - streamPreviewRenderedAtRef.current < STREAM_PREVIEW_MIN_INTERVAL_MS) return;
                             streamParseFrameRef.current = window.requestAnimationFrame(() => {
                                 streamParseFrameRef.current = 0;
                                 if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
+                                streamPreviewRenderedAtRef.current = Date.now();
                                 const nameToId = new Map(groupCharacters.map(item => [item.name, item.id]));
                                 const rawParts = parseGroupChatResponse(streamAccumRef.current, nameToId);
                                 const parts = rawParts

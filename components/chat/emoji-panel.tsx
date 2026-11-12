@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { loadStickerPacksForCharacters, type StickerPack } from "@/lib/custom-sticker-storage";
 import { getThemeAssetMap } from "@/lib/theme-storage";
 import { BUILTIN_SCREEN_EFFECTS, loadBuiltinScreenEffectSettings } from "@/lib/chat-screen-effects";
@@ -170,7 +170,9 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
         const immediate: Record<string, string> = {};
         const pendingAssetIds: string[] = [];
         for (const s of visibleStickers) {
-            const key = `${activePack.id}:${s.name}`;
+            // 用贴纸 id 而非 name 作 key：包内同名/空名表情会让 URL 互相覆盖，
+            // 而渲染侧 React key 用的也是 id，两边必须一致。
+            const key = `${activePack.id}:${s.id}`;
             if (packUrlMap[key]) continue;
             if (s.externalUrl) {
                 immediate[key] = s.externalUrl;
@@ -187,7 +189,7 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
                 const resolved: Record<string, string> = {};
                 for (const s of visibleStickers) {
                     if (s.assetId && assetMap[s.assetId]) {
-                        resolved[`${activePack.id}:${s.name}`] = assetMap[s.assetId];
+                        resolved[`${activePack.id}:${s.id}`] = assetMap[s.assetId];
                     }
                 }
                 if (Object.keys(resolved).length > 0) {
@@ -197,6 +199,27 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
         }
         return () => { cancelled = true; };
     }, [activePack, visibleLimit]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // 滚动到距底 160px 内自动追加一批，不再需要手动点「加载更多」
+    const gridRef = useRef<HTMLDivElement | null>(null);
+    const loadMoreIfNeeded = useCallback(() => {
+        const el = gridRef.current;
+        if (!el || !activePack) return;
+        if (visibleLimit >= activePack.stickers.length) return;
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 160) {
+            setVisibleLimit(v => Math.min(activePack.stickers.length, v + STICKER_PAGE_BATCH));
+        }
+    }, [activePack, visibleLimit]);
+
+    // 首屏没填满（大屏/桌面端滑不动）时自动继续追加，否则永远停在第一批
+    useEffect(() => {
+        const el = gridRef.current;
+        if (!el || !activePack) return;
+        if (visibleLimit >= activePack.stickers.length) return;
+        if (el.scrollHeight <= el.clientHeight + 40) {
+            setVisibleLimit(v => Math.min(activePack.stickers.length, v + STICKER_PAGE_BATCH));
+        }
+    }, [activePack, visibleLimit]);
 
     return (
         <div className="h-[220px] flex flex-col">
@@ -214,14 +237,14 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
                     ))}
                 </div>
             )}
-            <div className="flex-1 overflow-auto p-2 grid grid-cols-5 gap-1 content-start hide-scrollbar">
+            <div ref={gridRef} onScroll={loadMoreIfNeeded} className="flex-1 overflow-auto p-2 grid grid-cols-5 gap-1 content-start hide-scrollbar">
                 {!activePack && (
                     <div className="col-span-5 flex items-center justify-center text-[var(--c-text-muted)] ts-12 py-8">
                         暂无表情包，请在角色设置里上传或绑定。
                     </div>
                 )}
                 {activePack?.stickers.slice(0, visibleLimit).map(sticker => {
-                    const url = packUrlMap[`${activePack.id}:${sticker.name}`];
+                    const url = packUrlMap[`${activePack.id}:${sticker.id}`];
                     return (
                         <button
                             key={`${activePack.id}:${sticker.id}`}
@@ -242,15 +265,6 @@ export function StickerPanel({ onSend, characterId, characterIds }: StickerPanel
                         </button>
                     );
                 })}
-                {activePack && activePack.stickers.length > visibleLimit && (
-                    <button
-                        type="button"
-                        onClick={() => setVisibleLimit(v => v + STICKER_PAGE_BATCH)}
-                        className="col-span-5 py-2 ts-12 text-[var(--c-text-muted)] bg-black/5 rounded-lg cursor-pointer border-none"
-                    >
-                        加载更多 ({visibleLimit}/{activePack.stickers.length})
-                    </button>
-                )}
             </div>
         </div>
     );

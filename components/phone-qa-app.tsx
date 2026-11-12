@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 // CommonMark 的 flanking 规则会让 **「加粗」** 这类紧贴全角标点的写法解析失败
@@ -902,7 +902,6 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
     () => (allMessages.length > visibleMsgLimit ? allMessages.slice(-visibleMsgLimit) : allMessages),
     [allMessages, visibleMsgLimit],
   );
-  const hiddenMsgCount = Math.max(0, allMessages.length - messages.length);
   const createdContent = useMemo(() => activeSession?.createdContent ?? [], [activeSession]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewItem, setPreviewItem] = useState<QaCreatedContent | null>(null);
@@ -913,11 +912,32 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
 
   // 自动滚动：用户上滚阅读时不拉回底部；合并到 animationFrame 执行，避免流式期间高频同步 Reflow
   const scrollRafRef = useRef<number | null>(null);
+  const lastScrollTopRef = useRef(0);
+  // 上滑补载前记下滚动锚点，补载后用 useLayoutEffect 还原，避免视图跳动
+  const pendingPrependRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(null);
+
   const handleScroll = useCallback(() => {
     const el = bodyRef.current;
     if (!el) return;
-    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  }, []);
+    const prevTop = lastScrollTopRef.current;
+    lastScrollTopRef.current = el.scrollTop;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stickToBottomRef.current = nearBottom;
+    // 只有「确实在往上滑」才补载：初次挂载 scrollTop 本来就是 0，
+    // 不加方向判定会一进页面就把全部历史灌进来。
+    if (
+      !nearBottom
+      && !pendingPrependRef.current
+      && el.scrollTop < prevTop
+      && el.scrollTop < 80
+    ) {
+      setVisibleMsgLimit((current) => {
+        if (allMessages.length <= current) return current;
+        pendingPrependRef.current = { prevScrollHeight: el.scrollHeight, prevScrollTop: el.scrollTop };
+        return Math.min(allMessages.length, current + 24);
+      });
+    }
+  }, [allMessages.length]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -927,8 +947,42 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
       const el = bodyRef.current;
       if (el && stickToBottomRef.current) {
         el.scrollTop = el.scrollHeight;
+        lastScrollTopRef.current = el.scrollTop;
       }
     });
+  }, [messages]);
+
+  // 进入工坊 / 切换会话：水合是异步的，首帧贴底会落空；等 hydrated 后在
+  // 同步 + 下一帧 + 60ms 各贴一次，覆盖「消息渲染完成」的各个时间点。
+  useEffect(() => {
+    if (!snapshot.hydrated) return;
+    stickToBottomRef.current = true;
+    const scrollToEnd = () => {
+      const el = bodyRef.current;
+      if (!el) return;
+      el.scrollTop = el.scrollHeight;
+      lastScrollTopRef.current = el.scrollTop;
+    };
+    scrollToEnd();
+    const raf = requestAnimationFrame(scrollToEnd);
+    const timer = window.setTimeout(scrollToEnd, 60);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
+    };
+  }, [snapshot.activeSessionId, snapshot.hydrated]);
+
+  // 补载完历史后按「新增高度」回填 scrollTop，保持用户正在看的那条消息不动
+  useLayoutEffect(() => {
+    const pending = pendingPrependRef.current;
+    const el = bodyRef.current;
+    if (!pending || !el) return;
+    pendingPrependRef.current = null;
+    const delta = el.scrollHeight - pending.prevScrollHeight;
+    if (delta > 0) {
+      el.scrollTop = pending.prevScrollTop + delta;
+      lastScrollTopRef.current = el.scrollTop;
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -1162,16 +1216,6 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
           </div>
         ) : (
           <div className="qa-messages">
-            {hiddenMsgCount > 0 && (
-              <button
-                type="button"
-                className="qa-sheet-btn"
-                style={{ alignSelf: "center", margin: "4px 0 8px", fontSize: 12 }}
-                onClick={() => setVisibleMsgLimit((v) => v + 24)}
-              >
-                查看更早的 {Math.min(24, hiddenMsgCount)} 条消息（还有 {hiddenMsgCount} 条）
-              </button>
-            )}
             {messages.map((msg) => (
               <QaMessageItem key={msg.id} msg={msg} isStreaming={msg.id === streamingMsgId} onRetry={handleRetry} onViewImage={setViewerImage} onCopy={handleCopyMessage} onEdit={handleEditMessage} />
             ))}

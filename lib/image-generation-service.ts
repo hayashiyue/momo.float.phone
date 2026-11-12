@@ -584,10 +584,24 @@ async function generateImageViaServer(params: {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let idleTimer: ReturnType<typeof setTimeout> | undefined;
+        // 服务端每 3 秒发一个空格心跳，会把 25 秒 idle 计时器无限重置；
+        // 平台在 60 秒强杀函数后，WebKit 的 reader.read() 既不 resolve 也不 reject，
+        // 光靠 controller.abort() 唤不醒它——必须用独立的总时长计时器竞速掉这次 read。
+        const STREAM_TOTAL_LIMIT_MS = 62_000;
+        const streamDeadline = Date.now() + STREAM_TOTAL_LIMIT_MS;
         try {
           for (;;) {
-            idleTimer = setTimeout(() => controller.abort(), 25_000);
-            const { done, value } = await reader.read();
+            const remaining = streamDeadline - Date.now();
+            if (remaining <= 0) {
+              throw new Error("生图请求超时（服务器超过 62 秒未返回结果）。建议到「请求方式」改为「浏览器直连」以绕开平台 60 秒上限。");
+            }
+            idleTimer = setTimeout(() => controller.abort(), Math.min(25_000, remaining));
+            const { done, value } = await Promise.race([
+              reader.read(),
+              new Promise<never>((_, reject) => {
+                setTimeout(() => reject(new Error("生图请求超时（流式读取被挂起）。建议到「请求方式」改为「浏览器直连」。")), remaining);
+              }),
+            ]);
             clearTimeout(idleTimer);
             if (done) break;
             text += decoder.decode(value, { stream: true });

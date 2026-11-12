@@ -1163,6 +1163,17 @@ function normalizeLegacyTextToolHistory(messages: ChatMessage[]): {
     items: ChatMessage[];
     changedMessages: ChatMessage[];
 } {
+    // 快速短路：绝大多数人的聊天记录里没有需要迁移的旧版工具痕迹。
+    // 原实现对每条消息都做两次全表 scan，5000 条消息就是数千万次迭代，
+    // 且完全同步执行——冷启动后第一次碰聊天数据（如自定义 APP 首个 bridge 请求
+    // 触发的 hydrateChatStorage）就把主线程锁死，移动端直接被系统杀掉。
+    const hasLegacyCandidate = messages.some(m =>
+        (m.role === "user" && m.mediaType === "tool_result" && !m.nativeToolResult)
+        || (m.role === "assistant" && m.mediaType === "tool_result" && !m.nativeToolResult)
+        || (m.role === "assistant" && m.mediaType === "tool_notice" && Boolean(m.rawResponseText) && Boolean(m.responseBatchId)),
+    );
+    if (!hasLegacyCandidate) return { items: messages, changedMessages: [] };
+
     const byId = new Map(messages.map(message => [message.id, message]));
     const changed = new Map<string, ChatMessage>();
     const added: ChatMessage[] = [];

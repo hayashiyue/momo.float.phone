@@ -656,10 +656,16 @@ export async function sendQaMessage(
     let lastPaintAt = 0;
     let lastPaintLength = 0;
 
-    const paintAssistant = (patch: Partial<QaMsg>, options?: { persist?: boolean; force?: boolean }) => {
-        const now = Date.now();
-        if (!options?.force && streamedContent.length - lastPaintLength < 64 && now - lastPaintAt < 150) return;
-        lastPaintAt = now;
+    // 流式刷新节流：纯时间门槛 + 尾随定时器。
+    // 原条件 `增量<64 && 距上次<150ms` 用的是 &&——模型吐字快时每个网络包都
+    // 增量≥64 字符，节流形同虚设，每个包都同步走一遍 updateSession→publish→emit，
+    // 整棵工坊 UI 重渲染；吐字慢时又被整段丢弃、没有尾随刷新，画面停在旧状态。
+    const PAINT_MIN_INTERVAL_MS = 120;
+    let paintTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingPaint: { patch: Partial<QaMsg>; persist: boolean } | null = null;
+
+    const flushPaint = (patch: Partial<QaMsg>, persist: boolean) => {
+        lastPaintAt = Date.now();
         lastPaintLength = streamedContent.length;
         updateSession(
             sessionId,
@@ -680,8 +686,42 @@ export async function sendQaMessage(
                     return { ...m, ...patch, pendingCommit: effectivePendingCommit };
                 }),
             }),
-            { persist: options?.persist !== false },
+            { persist },
         );
+    };
+
+    const paintAssistant = (patch: Partial<QaMsg>, options?: { persist?: boolean; force?: boolean }) => {
+        const persist = options?.persist !== false;
+        if (options?.force) {
+            // 工具行、提案卡片这类离散状态必须立刻可见，同时把挂起的尾随刷新合并进来
+            if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
+            const merged = pendingPaint ? { ...pendingPaint.patch, ...patch } : patch;
+            pendingPaint = null;
+            flushPaint(merged, persist);
+            return;
+        }
+        pendingPaint = { patch: pendingPaint ? { ...pendingPaint.patch, ...patch } : patch, persist };
+        const wait = PAINT_MIN_INTERVAL_MS - (Date.now() - lastPaintAt);
+        if (wait <= 0) {
+            if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
+            const merged = pendingPaint;
+            pendingPaint = null;
+            flushPaint(merged.patch, merged.persist);
+            return;
+        }
+        if (paintTimer) return;
+        paintTimer = setTimeout(() => {
+            paintTimer = null;
+            const merged = pendingPaint;
+            if (!merged) return;
+            pendingPaint = null;
+            flushPaint(merged.patch, merged.persist);
+        }, wait);
+    };
+
+    const disposePaint = () => {
+        if (paintTimer) { clearTimeout(paintTimer); paintTimer = null; }
+        pendingPaint = null;
     };
 
     const toolLabel = (name: string): string => QA_TOOLS.find((t) => t.name === name)?.name ?? name;
@@ -898,6 +938,8 @@ export async function sendQaMessage(
             );
         }
     } finally {
+        // 收尾前先掐掉尾随刷新，避免本轮结束后还多刷一次旧 patch
+        disposePaint();
         isGenerating = false;
         if (abortController === controller) abortController = null;
         emit();

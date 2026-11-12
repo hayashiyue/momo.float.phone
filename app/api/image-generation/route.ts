@@ -14,7 +14,10 @@ import {
   normalizeNovelAiSteps,
 } from "@/lib/novelai-image-config";
 
-export const maxDuration = 120;
+// Vercel Hobby 计划的函数硬上限是 60 秒，写 120 会被平台压回 60 并直接强杀进程：
+// 那样既来不及给前端回错误帧，WebKit 的 reader.read() 又会永久挂起（表现为一直转圈）。
+// 所以这里声明真实的 60，并把上游超时压到 54 秒，保证在强杀之前主动收尾。
+export const maxDuration = 60;
 
 type ImageGenerationRequest = {
   provider?: "openai" | "novelai";
@@ -251,7 +254,8 @@ async function runNovelAiGeneration(input: ImageGenerationRequest): Promise<{ st
     });
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000);
+    // 54 秒：留 6 秒余量给平台 60 秒强杀，确保能主动返回超时错误而不是被直接掐断
+    const timeout = setTimeout(() => controller.abort(), 54_000);
     let res: Response;
     try {
       res = await externalFetch(url, { method: "POST", headers, body, signal: controller.signal });
@@ -339,7 +343,8 @@ async function runImageGeneration(input: ImageGenerationRequest): Promise<{ stat
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000);
+    // 同上：54 秒收尾，避免被平台 60 秒硬上限强杀
+    const timeout = setTimeout(() => controller.abort(), 54_000);
     let res: Response;
     try {
       res = await externalFetch(url, { method: "POST", headers, body, signal: controller.signal });

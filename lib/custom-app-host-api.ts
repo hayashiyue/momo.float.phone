@@ -54,7 +54,7 @@ import { loadMemoryConfig, loadMemoryEntriesByType, saveMemoryEntry } from "./me
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import type { MemoryEntry } from "./memory-types";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import {
   createWorldBook,
   createRegexGroup,
@@ -2433,17 +2433,29 @@ export async function readCustomAppLongTermMemory(record: Record<string, unknown
   };
 }
 
-export function readCustomAppShortTermMemory(app: InstalledCustomApp, record: Record<string, unknown>): {
+export async function readCustomAppShortTermMemory(app: InstalledCustomApp, record: Record<string, unknown>): Promise<{
   text: string;
   blocks: Record<string, unknown>[];
   items: Record<string, unknown>[];
-} {
+}> {
   const characterId = cleanText(record.characterId, 160);
   if (!characterId) throw new Error("memory.readShortTerm 缺少 characterId。");
   const limit = Math.max(1, Math.min(200, Number(record.limit ?? 50) || 50));
   const session = findReadableSession(record);
   const history = session ? loadChatMessages(session.id).slice(-limit) : [];
-  const context = prepareShortTermContext(characterId, `custom_app:${app.id}`, { history });
+  // 必须先异步分片加载时间线，再交给 prepareShortTermContext：同步版 loadNativeTimeline
+  // 会把 generator 的每个 yield 原地空转，在单帧内反序列化聊天/朋友圈/日记/剧场等
+  // 十几类模块的全部数据，移动端直接内存爆炸闪退。
+  const memConfig = loadMemoryConfig();
+  const maxMessagesPerSession = memConfig.shortTermTokenBudget > 0
+    ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4)))
+    : 800;
+  const timeline = await loadNativeTimelineAsync(characterId, {
+    appId: `custom_app:${app.id}` as import("./settings-types").ContentAppId,
+    maxMessagesPerSession,
+    allowedSources: memConfig.shortTermAllowedSources,
+  });
+  const context = prepareShortTermContext(characterId, `custom_app:${app.id}`, { history, timeline });
   const items = context.unifiedRecentItems.slice(-limit).map(item => ({
     kind: item.kind,
     timestamp: item.timestamp,

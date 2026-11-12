@@ -96,6 +96,12 @@ export function ImageGenerationSettings() {
     const [naiModels, setNaiModels] = useState<string[]>(NOVELAI_COMMON_MODELS);
     const [isFetchingNaiModels, setIsFetchingNaiModels] = useState(false);
     const [isTesting, setIsTesting] = useState(false);
+    // 测试生图的取消句柄：组件卸载时也要 abort，避免请求在后台继续跑
+    const testAbortRef = useRef<AbortController | null>(null);
+    useEffect(() => () => {
+        testAbortRef.current?.abort();
+        testAbortRef.current = null;
+    }, []);
     const [status, setStatus] = useState<Status | null>(null);
     const [naiTokenStatus, setNaiTokenStatus] = useState<Status | null>(null);
     const [testPreviewUrl, setTestPreviewUrl] = useState<string | null>(null);
@@ -395,15 +401,39 @@ export function ImageGenerationSettings() {
     };
 
     const testGeneration = async () => {
+        // 测试中再点一次 = 取消。此前按钮 disabled={isTesting}，一旦底层卡住
+        // （平台强杀函数后 WebKit 的 reader.read() 既不 resolve 也不 reject）
+        // 用户连取消都点不了，只能刷新页面。
+        if (isTesting) {
+            testAbortRef.current?.abort();
+            testAbortRef.current = null;
+            setIsTesting(false);
+            setStatus({ success: false, message: "已取消测试生图。" });
+            return;
+        }
         setStatus(null);
         setIsTesting(true);
+        const controller = new AbortController();
+        testAbortRef.current = controller;
+        // 硬超时兜底：不能只依赖 abort 去打断已开始的流式读取，
+        // 必须用一个独立计时器把 Promise 竞速掉，界面才能准时退出转圈。
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-            const result = await generateImageFromConfiguredApi({
-                description: settings.provider === "novelai"
-                    ? "1girl, solo, upper body, white coffee cup on the wooden table, soft window light"
-                    : "一张放在桌面上的白色咖啡杯，柔和自然光，真实照片风格",
-                settings: { ...settings, enabled: true },
-            });
+            const result = await Promise.race([
+                generateImageFromConfiguredApi({
+                    description: settings.provider === "novelai"
+                        ? "1girl, solo, upper body, white coffee cup on the wooden table, soft window light"
+                        : "一张放在桌面上的白色咖啡杯，柔和自然光，真实照片风格",
+                    settings: { ...settings, enabled: true },
+                    signal: controller.signal,
+                }),
+                new Promise<never>((_, reject) => {
+                    timeoutTimer = setTimeout(() => {
+                        controller.abort();
+                        reject(new Error("测试生图超时（65 秒未返回）。服务器端生图受平台 60 秒上限限制，建议到「请求方式」改为「浏览器直连」。"));
+                    }, 65_000);
+                }),
+            ]);
             if (!result) throw new Error("图像生成未返回结果。");
             if (testPreviewUrl) URL.revokeObjectURL(testPreviewUrl);
             setTestPreviewUrl(URL.createObjectURL(result.blob));
@@ -411,6 +441,8 @@ export function ImageGenerationSettings() {
         } catch (err) {
             setStatus({ success: false, message: err instanceof Error ? err.message : String(err) });
         } finally {
+            if (timeoutTimer) clearTimeout(timeoutTimer);
+            if (testAbortRef.current === controller) testAbortRef.current = null;
             setIsTesting(false);
         }
     };
@@ -1109,11 +1141,10 @@ export function ImageGenerationSettings() {
                     <button
                         type="button"
                         onClick={testGeneration}
-                        disabled={isTesting}
                         className="ui-btn ui-btn-success flex-1"
                     >
                         <Image size={16} />
-                        {isTesting ? "测试中..." : "测试生图"}
+                        {isTesting ? "取消测试" : "测试生图"}
                     </button>
                 </div>
 

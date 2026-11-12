@@ -1524,6 +1524,8 @@ function shouldRunRule(
 
 /** Apply regex rules that match a given placement + context. */
 function applyRegex(text: string, regexGroups: RegexConfig[], placement: number, ctx: RegexContext = {}): string {
+    // 空文本或没配正则时直接返回，省掉外层两层循环的遍历开销
+    if (!text || regexGroups.length === 0) return text;
     let result = text;
     for (const group of regexGroups) {
         for (const rule of group.rules) {
