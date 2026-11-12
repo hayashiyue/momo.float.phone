@@ -1,4 +1,4 @@
-const CACHE_VERSION = "ai-phone-pwa-v14";
+const CACHE_VERSION = "ai-phone-pwa-v15";
 const NAVIGATE_FETCH_TIMEOUT_MS = 1800;
 const ASSET_FETCH_TIMEOUT_MS = 8000;
 
@@ -54,16 +54,29 @@ function isCacheableRequest(request) {
 
 async function networkFirst(request) {
   const cache = await caches.open(RUNTIME_CACHE);
-  // 优先查本地已有缓存（含忽略 search 参数的 "/" 兜底）：
-  // 只要本地有旧壳，最多等 1.8 秒网络；若连不上 Vercel 立即秒回本地缓存，后台静默更新。
   const cached = (await cache.match(request, { ignoreSearch: true }))
     || (await caches.match("/", { ignoreSearch: true }));
+
+  // 缓存优先：只要本地有旧壳就 0 毫秒直接返回，绝不等网络。
+  // 原实现是「先等网络 1.8 秒再回退」，而 iOS WebKit 上 AbortController.abort()
+  // 未必能中断已在进行的底层导航，.vercel.app 在国内握手黑洞时照样会等满
+  // CFNetwork 的 60 秒，这才是「打开要一分多钟纯白屏」的真正来源。
+  if (cached) {
+    // 后台静默更新，不阻塞返回；失败也不影响本次打开。
+    fetchWithSwTimeout(request, ASSET_FETCH_TIMEOUT_MS)
+      .then((response) => { if (response.ok) cache.put(request, response.clone()); })
+      .catch(() => {});
+    return cached;
+  }
+
+  // 本地完全没缓存（首次安装）：只能等网络。
   try {
     const response = await fetchWithSwTimeout(request, NAVIGATE_FETCH_TIMEOUT_MS);
     if (response.ok) cache.put(request, response.clone());
     return response;
   } catch (error) {
-    if (cached) return cached;
+    const fallback = await caches.match("/", { ignoreSearch: true });
+    if (fallback) return fallback;
     throw error;
   }
 }

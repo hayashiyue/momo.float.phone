@@ -123,19 +123,13 @@ export function hydrateKvDb(): Promise<void> {
         // 让出的只是 set 循环，真正的全量反序列化仍然是一次性的，条目越多冷启动内存峰值
         // 和主线程阻塞越严重（表现为开屏长时间白屏，低内存设备上还会抬高后续生成闪退概率）。
         // 改为每批 HYDRATE_CHUNK_SIZE 条读一次、立刻写进缓存、再让出主线程，峰值只剩一批。
-        const HYDRATE_CHUNK_SIZE = 250;
-        let lastKey: string | undefined = undefined;
-        while (true) {
-            const batch: { key: string; value: string }[] = lastKey === undefined
-                ? await kvDb.entries.limit(HYDRATE_CHUNK_SIZE).toArray()
-                : await kvDb.entries.where(":id").above(lastKey).limit(HYDRATE_CHUNK_SIZE).toArray();
-            if (batch.length === 0) break;
-            for (const { key, value } of batch) {
-                if (!_cache.has(key)) _cache.set(key, value);
-            }
-            lastKey = batch[batch.length - 1].key;
-            if (batch.length < HYDRATE_CHUNK_SIZE) break;
-            await new Promise<void>(resolve => setTimeout(resolve, 0));
+        // 单次事务全量读取：分批游标（每 250 条开一次新事务 + setTimeout 让出）在
+        // iOS 跨进程 IndexedDB 上要付出几十次 IPC 往返，实测把「几秒」的冷启动
+        // 恶化成 60 秒以上白屏。而 toArray 一次性拿回后，纯内存 Map.set 几千条
+        // 只需几毫秒，没有必须在循环里打断让出的理由。
+        const all = await kvDb.entries.toArray();
+        for (const { key, value } of all) {
+            if (!_cache.has(key)) _cache.set(key, value);
         }
 
         // Migrate from localStorage
