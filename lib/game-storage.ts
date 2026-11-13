@@ -246,12 +246,25 @@ function createDefaultGameState(): GameState {
   };
 }
 
+// 游戏状态是短期记忆链路上的重灾区：installedGames 里存着每个已安装小游戏的完整
+// HTML 模板快照、封面 base64，saves 最多 500 条存档，全绑在同一个 KV 大 JSON 里。
+// 原来每次 loadGameState() 都要 JSON.parse 整包 + 逐个 normalize，而
+// loadGameProjectionEntries 在每次组装短期上下文时都会被调用（聊天、朋友圈后台轮询
+// 都会触发），等于每轮对话都把整个游戏大厅反序列化一遍。这里按原始字符串引用比对缓存。
+let _gameStateMemoRaw: string | null | undefined = undefined;
+let _gameStateMemoResult: GameState | null = null;
+
 export function loadGameState(): GameState {
   const raw = typeof window !== "undefined" ? kvGet(GAME_STATE_KEY) : null;
-  if (!raw) return createDefaultGameState();
+  if (!raw) {
+    _gameStateMemoRaw = raw;
+    _gameStateMemoResult = null;
+    return createDefaultGameState();
+  }
+  if (raw === _gameStateMemoRaw && _gameStateMemoResult) return _gameStateMemoResult;
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return {
+    const result: GameState = {
       userId: cleanText(parsed.userId, 160) || createDefaultGameState().userId,
       displayName: cleanText(parsed.displayName, 80) || "本机玩家",
       avatarUrl: cleanText(parsed.avatarUrl, 120000),
@@ -275,6 +288,9 @@ export function loadGameState(): GameState {
         : [],
       updatedAt: cleanText(parsed.updatedAt, 80) || new Date().toISOString(),
     };
+    _gameStateMemoRaw = raw;
+    _gameStateMemoResult = result;
+    return result;
   } catch {
     return createDefaultGameState();
   }
@@ -298,7 +314,10 @@ export function saveGameState(state: GameState): GameState {
       .slice(-MAX_GAME_PROJECTION_EVENTS),
     updatedAt: new Date().toISOString(),
   };
-  kvSet(GAME_STATE_KEY, JSON.stringify(next));
+  const serialized = JSON.stringify(next);
+  kvSet(GAME_STATE_KEY, serialized);
+  _gameStateMemoRaw = serialized;
+  _gameStateMemoResult = next;
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(GAME_UPDATED_EVENT));
   return next;
 }
@@ -581,4 +600,6 @@ export function saveGameDrafts(drafts: GameHallDraft[]): GameHallDraft[] {
 export function deleteAllGameData(): void {
   kvRemove(GAME_STATE_KEY);
   kvRemove(GAME_DRAFTS_KEY);
+  _gameStateMemoRaw = undefined;
+  _gameStateMemoResult = null;
 }

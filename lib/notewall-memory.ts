@@ -39,14 +39,21 @@ function cleanEventText(value: string, maxLength: number): string {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+const _noteWallEventsMemo = new Map<string, { raw: string; entries: NoteWallProjectionEntry[] }>();
+
 function loadEventsByKey(key: string): NoteWallProjectionEntry[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(key);
-    if (!raw) return [];
+    if (!raw) {
+      _noteWallEventsMemo.delete(key);
+      return [];
+    }
+    const cached = _noteWallEventsMemo.get(key);
+    if (cached && cached.raw === raw) return cached.entries;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const entries = parsed
       .filter((entry): entry is NoteWallProjectionEntry =>
         entry
         && typeof entry.id === "string"
@@ -54,6 +61,8 @@ function loadEventsByKey(key: string): NoteWallProjectionEntry[] {
         && typeof entry.content === "string"
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    _noteWallEventsMemo.set(key, { raw, entries });
+    return entries;
   } catch {
     return [];
   }
@@ -68,7 +77,9 @@ function saveEventsByKey(key: string, events: NoteWallProjectionEntry[]): void {
   const compacted = [...events]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
     .slice(-MAX_EVENTS_PER_CHARACTER);
-  kvSet(key, JSON.stringify(compacted));
+  const serialized = JSON.stringify(compacted);
+  kvSet(key, serialized);
+  _noteWallEventsMemo.set(key, { raw: serialized, entries: compacted });
 }
 
 function saveEvents(characterId: string, events: NoteWallProjectionEntry[]): void {

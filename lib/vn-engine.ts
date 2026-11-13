@@ -15,7 +15,7 @@ import { previewMessagesForApi, sendLLMRequest, ChatEngineError } from "./chat-e
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
 import { parseVnResponse } from "./vn-parser";
@@ -143,10 +143,12 @@ async function buildVnPromptMessages(
   const userIdentity = resolveUserIdentity(characterId, "vn");
   const historyMessages = history.map(toHistoryMessage);
   const memConfig = loadMemoryConfig();
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(characterId, { appId: "vn" });
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(
     characterId,
     "vn",
-    { userName: userIdentity?.name ?? "用户", history: historyMessages }
+    { userName: userIdentity?.name ?? "用户", history: historyMessages, timeline }
   );
 
   const chatBilingualInstruction = buildVnBilingualInstruction(

@@ -443,16 +443,26 @@ export type AdventureSummary = {
   userName?: string;
 };
 
+// loadMapProjectionEntries / loadMapSharedProjectionEntries 会遍历每个存档逐个读摘要，
+// 原来每次都是无缓存 JSON.parse。这里按 worldId 记原始字符串引用比对。
+const _advSummaryMemo = new Map<string, { raw: string; summary: AdventureSummary | null }>();
+
 export function loadAdventureSummary(worldId: string): AdventureSummary | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = kvGet(ADVENTURE_SUMMARY_KEY_PREFIX + worldId);
-    if (raw) return JSON.parse(raw);
+    const raw = kvGet(ADVENTURE_SUMMARY_KEY_PREFIX + worldId) || "";
+    const cached = _advSummaryMemo.get(worldId);
+    if (cached && cached.raw === raw) return cached.summary;
+    const summary = raw ? (JSON.parse(raw) as AdventureSummary) : null;
+    _advSummaryMemo.set(worldId, { raw, summary });
+    return summary;
   } catch { /* ignore */ }
   return null;
 }
 
 export function saveAdventureSummary(worldId: string, summary: AdventureSummary): void {
   if (typeof window === "undefined") return;
-  kvSet(ADVENTURE_SUMMARY_KEY_PREFIX + worldId, JSON.stringify(summary));
+  const serialized = JSON.stringify(summary);
+  kvSet(ADVENTURE_SUMMARY_KEY_PREFIX + worldId, serialized);
+  _advSummaryMemo.set(worldId, { raw: serialized, summary });
 }

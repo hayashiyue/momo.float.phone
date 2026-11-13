@@ -360,7 +360,60 @@ export type EnabledTool = {
     mcpTools?: McpDiscoveredTool[];
 };
 
+// getEnabledTools 一次要级联读 REST / 复合工具、包、MCP、内置能力、自定义 APP 工具，
+// 内部全是 kvGet + JSON.parse + 多次 stringify 比对。聊天链路里
+// buildChatPromptMessages 与 generateNativeChatCompletion 每次请求各调一次，
+// 数据量大时这部分纯重复劳动就会堵住主线程。
+// 这里用「所有底层 KV 原始字符串」做缓存签名校验：任何一个相关 KV 变了就失效，
+// 绝不脏读，也不需要各处手动 invalidate。
+// 注意：签名只做逐项 === 比较，绝不把这些字符串拼接起来——
+// ai_phone_custom_apps_v1 里带着所有自定义 APP 的 HTML 与 base64 资源，可能几十 MB，
+// join() 会把它们整份拷进一个新字符串，反而比原来的问题更致命。
+// kvGet 返回的是内存 Map 里同一个字符串实例，=== 走指针比较，零拷贝。
+const ENABLED_TOOLS_SIGNATURE_KEYS = [
+    REST_TOOLS_KEY,
+    REST_TOOL_PACKAGES_KEY,
+    COMPOSITE_TOOLS_KEY,
+    COMPOSITE_TOOL_PACKAGES_KEY,
+    MCP_SERVERS_KEY,
+    "ai_phone_internal_capabilities_v1",
+    "ai_phone_custom_apps_v1",
+];
+
+let _enabledToolsCacheSignature: Array<string | null> | null = null;
+let _enabledToolsCacheAppId: string | undefined = undefined;
+let _enabledToolsCacheResult: EnabledTool[] | null = null;
+
+function readEnabledToolsSignature(): Array<string | null> {
+    return ENABLED_TOOLS_SIGNATURE_KEYS.map(key => kvGet(key) ?? null);
+}
+
+function isSameSignature(a: Array<string | null>, b: Array<string | null>): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+        if (a[i] !== b[i]) return false;
+    }
+    return true;
+}
+
 export function getEnabledTools(appId?: string): EnabledTool[] {
+    const signature = readEnabledToolsSignature();
+    if (
+        _enabledToolsCacheResult
+        && _enabledToolsCacheAppId === appId
+        && _enabledToolsCacheSignature
+        && isSameSignature(_enabledToolsCacheSignature, signature)
+    ) {
+        return _enabledToolsCacheResult;
+    }
+    const tools = buildEnabledTools(appId);
+    _enabledToolsCacheSignature = signature;
+    _enabledToolsCacheAppId = appId;
+    _enabledToolsCacheResult = tools;
+    return tools;
+}
+
+function buildEnabledTools(appId?: string): EnabledTool[] {
     const tools: EnabledTool[] = [];
 
     const restTools = loadRestTools();

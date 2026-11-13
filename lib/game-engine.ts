@@ -7,7 +7,7 @@ import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import {
   loadApiConfigs,
   loadBindingConfig,
@@ -85,8 +85,12 @@ export async function buildGameRolePackage(input: {
   const userName = userIdentity?.name || "用户";
   const memConfig = loadMemoryConfig();
 
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = input.mode === "full"
+    ? await loadNativeTimelineAsync(input.characterId, { appId: GAME_PROMPT_APP_ID })
+    : undefined;
   const shortTerm = input.mode === "full"
-    ? prepareShortTermContext(input.characterId, GAME_PROMPT_APP_ID, { userName, history: [] })
+    ? prepareShortTermContext(input.characterId, GAME_PROMPT_APP_ID, { userName, history: [], timeline })
     : null;
   const activationContext = input.activationContext?.trim()
     || shortTerm?.wbActivationContext

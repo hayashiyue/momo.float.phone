@@ -942,14 +942,24 @@ export function writeCustomAppCollection(appId: string, collection: string, rows
   kvSet(customAppCollectionKey(appId, collection), JSON.stringify(rows));
 }
 
+// 每个自定义 APP 的时间线单独一个 key，loadCustomAppTimelineEntries 会遍历所有已安装
+// APP 逐个读取。原来没有任何缓存，等于每次组装短期上下文都把所有 APP 的时间线全量
+// JSON.parse 一遍（且每条记录的 data 字段还会被 cleanRecord 再做一次深拷贝序列化）。
+const _customAppTimelineMemo = new Map<string, { raw: string; entries: CustomAppTimelineEntry[] }>();
+
 function loadCustomAppTimelineForApp(appId: string): CustomAppTimelineEntry[] {
   const id = cleanId(appId);
   const raw = kvGet(`${CUSTOM_APP_TIMELINE_PREFIX}${id}`);
-  if (!raw) return [];
+  if (!raw) {
+    _customAppTimelineMemo.delete(id);
+    return [];
+  }
+  const cached = _customAppTimelineMemo.get(id);
+  if (cached && cached.raw === raw) return cached.entries;
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.map(item => {
+    const entries = parsed.map(item => {
       if (!item || typeof item !== "object") return null;
       const record = item as Record<string, unknown>;
       const summary = cleanText(record.summary, 2000);
@@ -967,6 +977,8 @@ function loadCustomAppTimelineForApp(appId: string): CustomAppTimelineEntry[] {
         data: cleanRecord(record.data),
       } satisfies CustomAppTimelineEntry;
     }).filter(Boolean) as CustomAppTimelineEntry[];
+    _customAppTimelineMemo.set(id, { raw, entries });
+    return entries;
   } catch {
     return [];
   }
@@ -977,7 +989,9 @@ function saveCustomAppTimelineForApp(appId: string, entries: CustomAppTimelineEn
   const normalized = entries
     .filter(item => item.characterId && item.summary)
     .slice(0, 500);
-  kvSet(`${CUSTOM_APP_TIMELINE_PREFIX}${id}`, JSON.stringify(normalized));
+  const serialized = JSON.stringify(normalized);
+  kvSet(`${CUSTOM_APP_TIMELINE_PREFIX}${id}`, serialized);
+  _customAppTimelineMemo.set(id, { raw: serialized, entries: normalized });
 }
 
 export function appendCustomAppTimelineEntry(

@@ -76,7 +76,7 @@ import {
 import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./settings-types";
 import { DEFAULT_CHECKPHONE_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./bilingual-prompt-defaults";
 import { loadCheckPhoneSettings } from "./checkphone-settings";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { loadPhoneSnapshot } from "./checkphone-storage";
 
 function buildCheckPhoneBilingualInstruction(enabled: boolean, customPrompt?: string): string {
@@ -125,9 +125,13 @@ async function buildCheckPhoneManifestMessages(
   const userIdentity = resolveUserIdentity(characterId, "checkphone");
   const settings = loadCheckPhoneSettings();
   const memConfig = loadMemoryConfig();
+  // 传 timeline：否则 prepareShortTermContext 会走同步版 loadNativeTimeline，
+  // 在主线程把全部短期模块的 KV 大 JSON 同步 parse 一遍。
+  const timeline = await loadNativeTimelineAsync(characterId, { appId: "checkphone" });
   const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "checkphone", {
     userName: userIdentity?.name ?? "用户",
     history: [],
+    timeline,
   });
 
   const [memories, coreMemories] = await Promise.all([
@@ -1182,9 +1186,12 @@ async function buildCheckPhoneAppMessages(
   const userIdentity = resolveUserIdentity(characterId, "checkphone");
   const settings = loadCheckPhoneSettings();
   const memConfig = loadMemoryConfig();
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(characterId, { appId: "checkphone" });
   const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "checkphone", {
     userName: userIdentity?.name ?? "用户",
     history: [],
+    timeline,
   });
 
   const [memories, coreMemories] = await Promise.all([

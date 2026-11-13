@@ -5,7 +5,7 @@ import { assemblePromptPayload } from "./llm-prompt-assembler";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import {
   loadApiConfigs,
   loadBindingConfig,
@@ -485,10 +485,12 @@ export async function generateCoCreateReply(
   const projectContext = buildProjectContext(workingSession, mode);
   const currentChapter = formatCurrentChapterForPrompt(workingSession);
   const memConfig = loadMemoryConfig();
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(runtime.character.id, { appId: COCREATE_APP_ID });
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(
     runtime.character.id,
     COCREATE_APP_ID,
-    { history, userName: runtime.userName, includeNativeToolHistory: usesNativeActions },
+    { history, userName: runtime.userName, includeNativeToolHistory: usesNativeActions, timeline },
   );
   const cocreateActivationContext = [
     wbActivationContext,
@@ -769,10 +771,12 @@ export async function previewCoCreatePromptPayload(
   const projectContext = buildProjectContext(workingSession, mode);
   const currentChapter = formatCurrentChapterForPrompt(workingSession);
   const memConfig = loadMemoryConfig();
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(runtime.character.id, { appId: COCREATE_APP_ID });
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(
     runtime.character.id,
     COCREATE_APP_ID,
-    { history, userName: runtime.userName, includeNativeToolHistory: usesNativeActions },
+    { history, userName: runtime.userName, includeNativeToolHistory: usesNativeActions, timeline },
   );
   const cocreateActivationContext = [
     wbActivationContext,

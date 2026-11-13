@@ -42,7 +42,7 @@ import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
 import { assemblePromptPayload, type LLMMessage, type AssemblerInput } from "./llm-prompt-assembler";
 import type { RegexConfig } from "./settings-types";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
@@ -218,6 +218,16 @@ async function resolveAssemblerInput(
     const userIdentity = resolveChatScopeUserIdentity(characterId, "chat");
 
     // 7. Load long-term memories (NPC doesn't share the character's memory)
+    // 时间线只加载一次，供下面的记忆检索与第 9 步短期上下文共用。
+    // 原来两次 prepareShortTermContext 都没传 timeline，各自走同步版 loadNativeTimeline，
+    // 单次朋友圈生成要把全部短期模块的 KV 大 JSON 同步 parse 两遍，主线程直接卡死。
+    let nativeTimeline: Awaited<ReturnType<typeof loadNativeTimelineAsync>> | undefined;
+    try {
+        nativeTimeline = await loadNativeTimelineAsync(characterId, { appId: "moments" });
+    } catch (err) {
+        console.warn("[Moments] Native timeline load failed:", err);
+    }
+
     let coreMemories = "";
     let longTermMemories = "";
     const memConfig = loadMemoryConfig();
@@ -225,7 +235,9 @@ async function resolveAssemblerInput(
         try {
             const coreResultsPromise = retrieveCoreMemoriesForPrompt(characterId, memConfig);
             // Use native timeline as retrieval context (same cross-app data as short-term memory)
-            const { wbActivationContext: recentCtx } = prepareShortTermContext(characterId, "moments");
+            const { wbActivationContext: recentCtx } = prepareShortTermContext(characterId, "moments", {
+                timeline: nativeTimeline,
+            });
             const [coreResults, results] = await Promise.all([
                 coreResultsPromise,
                 recentCtx.trim()
@@ -256,7 +268,9 @@ async function resolveAssemblerInput(
 
     // 9. Build AssemblerInput — unified short-term context
     const isNPC = task === "npc" || task === "npc_reply";
-    const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "moments");
+    const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "moments", {
+        timeline: nativeTimeline,
+    });
 
     // Calendar schedule (NPC doesn't get character's schedule)
     const scheduleSummary = isNPC ? undefined : buildCalendarScheduleMarker("character", characterId, getWeekStartIso(new Date()));

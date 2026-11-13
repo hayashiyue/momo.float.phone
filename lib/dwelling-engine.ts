@@ -16,7 +16,7 @@ import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
 
@@ -58,9 +58,12 @@ async function buildDwellingMessages(
 
     const userIdentity = resolveUserIdentity(characterId, "dwelling");
     const memConfig = loadMemoryConfig();
+    // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+    const timeline = await loadNativeTimelineAsync(characterId, { appId: "dwelling" });
     const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "dwelling", {
         userName: userIdentity?.name ?? "用户",
         history: [],
+        timeline,
     });
 
     const [memories, coreMemories] = await Promise.all([

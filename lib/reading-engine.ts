@@ -24,7 +24,7 @@ import type { ApiConfig, PresetConfig, RegexConfig } from "./settings-types";
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { DEFAULT_READING_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./bilingual-prompt-defaults";
 
@@ -101,9 +101,12 @@ async function resolveReadingInput(
     const longTermMemories = await retrieveMemoriesForPrompt(characterId, options.bookTitle, memConfig);
 
     // Short-term context
+    // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+    const timeline = await loadNativeTimelineAsync(characterId, { appId: "reading" });
     const { recentBlocks, truncatedHistory, unifiedRecentItems } = prepareShortTermContext(characterId, "chat", {
         history: options.history,
         userName: userIdentity?.name ?? "用户",
+        timeline,
     });
     const readingConfig = loadReadingInteractionConfig();
 

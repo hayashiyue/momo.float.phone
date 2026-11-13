@@ -7,7 +7,7 @@ import { DEFAULT_XIAOHONGSHU_BILINGUAL_PROMPT, resolveBilingualPrompt } from "./
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import {
   loadApiConfigs,
   loadBindingConfig,
@@ -1079,7 +1079,9 @@ async function resolveCharacterAssemblerInput(
     .map(id => loadRegexes().find(regex => regex.id === id))
     .filter(Boolean) as RegexConfig[];
   const userIdentity = resolveUserIdentity(characterId, "chat");
-  const prepared = prepareShortTermContext(characterId, "xiaohongshu");
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(characterId, { appId: "xiaohongshu" });
+  const prepared = prepareShortTermContext(characterId, "xiaohongshu", { timeline });
   const memConfig = loadMemoryConfig();
   const [memories, coreMemories] = await Promise.all([
     retrieveMemoriesForPrompt(characterId, prepared.wbActivationContext, memConfig).catch(() => []),

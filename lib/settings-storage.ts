@@ -556,10 +556,20 @@ function normalizeRegexGroupScopes(group: RegexConfig): RegexConfig {
         : { ...group, rules };
 }
 
+let _regexesMemoSource: RegexConfig[] | null = null;
+let _regexesMemoResult: RegexConfig[] | null = null;
+
 export function loadRegexes(): RegexConfig[] {
     if (typeof window === "undefined") return [];
     try {
-        return readRegexesCache().map(normalizeRegexGroupScopes);
+        const source = readRegexesCache();
+        if (source === _regexesMemoSource && _regexesMemoResult) {
+            return _regexesMemoResult;
+        }
+        const result = source.map(normalizeRegexGroupScopes);
+        _regexesMemoSource = source;
+        _regexesMemoResult = result;
+        return result;
     } catch {
         return [];
     }
@@ -568,6 +578,8 @@ export function loadRegexes(): RegexConfig[] {
 export function saveRegexes(regexes: RegexConfig[]): void {
     if (typeof window === "undefined") return;
     writeRegexesCache(regexes);
+    _regexesMemoSource = null;
+    _regexesMemoResult = null;
     window.dispatchEvent(new CustomEvent("settings-regexes-updated"));
 }
 

@@ -47,14 +47,21 @@ function cleanText(value: unknown, maxLength: number): string {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+const _interviewEventsMemo = new Map<string, { raw: string; entries: InterviewMagazineProjectionEntry[] }>();
+
 function loadEventsByKey(key: string): InterviewMagazineProjectionEntry[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(key);
-    if (!raw) return [];
+    if (!raw) {
+      _interviewEventsMemo.delete(key);
+      return [];
+    }
+    const cached = _interviewEventsMemo.get(key);
+    if (cached && cached.raw === raw) return cached.entries;
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const entries = parsed
       .filter((entry): entry is InterviewMagazineProjectionEntry =>
         Boolean(entry)
         && typeof (entry as Partial<InterviewMagazineProjectionEntry>).id === "string"
@@ -63,6 +70,8 @@ function loadEventsByKey(key: string): InterviewMagazineProjectionEntry[] {
         && typeof (entry as Partial<InterviewMagazineProjectionEntry>).content === "string"
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    _interviewEventsMemo.set(key, { raw, entries });
+    return entries;
   } catch {
     return [];
   }
@@ -73,7 +82,9 @@ function saveEventsByKey(key: string, events: InterviewMagazineProjectionEntry[]
   const compacted = [...events]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
     .slice(-MAX_INTERVIEW_PROJECTION_EVENTS);
-  kvSet(key, JSON.stringify(compacted));
+  const serialized = JSON.stringify(compacted);
+  kvSet(key, serialized);
+  _interviewEventsMemo.set(key, { raw: serialized, entries: compacted });
 }
 
 export function recordInterviewMagazineProjectionEvent(input: RecordInterviewMagazineProjectionInput): InterviewMagazineProjectionEntry | null {

@@ -17,7 +17,7 @@ import { assemblePromptPayload } from "./llm-prompt-assembler";
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { getCustomStickerExample, getCustomStickerNames } from "./custom-sticker-storage";
 import { previewMessagesForApi, sendLLMRequest, type ChatEngineError } from "./chat-engine";
 import { buildCalendarScheduleMarker, clearGeneratedWeekItems, cloneWeekPlanWithManualEdits, normalizeGeneratedScheduleItems, restoreCalendarWeekItems } from "./calendar-storage";
@@ -187,7 +187,9 @@ async function resolveCalendarAssemblerInput(
   let wbActivationContext = "";
 
   if (ownerType === "character") {
-    const prepared = prepareShortTermContext(ownerId, "calendar", { history: [] });
+    // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+    const timeline = await loadNativeTimelineAsync(ownerId, { appId: "calendar" });
+    const prepared = prepareShortTermContext(ownerId, "calendar", { history: [], timeline });
     recentBlocks = prepared.recentBlocks;
     unifiedRecentItems = prepared.unifiedRecentItems;
     wbActivationContext = prepared.wbActivationContext;

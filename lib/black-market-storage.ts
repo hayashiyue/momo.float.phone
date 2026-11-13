@@ -317,18 +317,32 @@ export function createDefaultBlackMarketState(): BlackMarketState {
   };
 }
 
+// 黑市状态里 ownedTheaters 每条都带 openingHtml（上限 6 万字）、aiInstruction（3 万字）、
+// renderCss（2 万字），最多 200 条；getActiveBlackMarketTheaterForChat 的 state 又是默认参数，
+// 聊天链路每次检查有没有激活中的剧场都会全量 parse 一遍。这里按原始字符串引用比对缓存。
+let _bmStateMemoRaw: string | null | undefined = undefined;
+let _bmStateMemoResult: BlackMarketState | null = null;
+
 export function loadBlackMarketState(): BlackMarketState {
   if (typeof window === "undefined") return createDefaultBlackMarketState();
   try {
     const raw = kvGet(BLACK_MARKET_STATE_KEY);
-    if (!raw) return createDefaultBlackMarketState();
+    if (!raw) {
+      _bmStateMemoRaw = raw;
+      _bmStateMemoResult = null;
+      return createDefaultBlackMarketState();
+    }
+    if (raw === _bmStateMemoRaw && _bmStateMemoResult) return _bmStateMemoResult;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return {
+    const result: BlackMarketState = {
       wallet: normalizeWallet(parsed.wallet),
       ownedTheaters: normalizeArray(parsed.ownedTheaters, normalizeOwnedTheater).slice(0, 200),
       activeTheaters: normalizeArray(parsed.activeTheaters, normalizeActiveTheater).slice(0, 20),
       updatedAt: cleanText(parsed.updatedAt, 80) || new Date().toISOString(),
     };
+    _bmStateMemoRaw = raw;
+    _bmStateMemoResult = result;
+    return result;
   } catch {
     return createDefaultBlackMarketState();
   }
@@ -347,7 +361,10 @@ export function saveBlackMarketState(state: BlackMarketState): BlackMarketState 
     activeTheaters: state.activeTheaters.slice(0, 20),
     updatedAt: new Date().toISOString(),
   };
-  kvSet(BLACK_MARKET_STATE_KEY, JSON.stringify(next));
+  const serialized = JSON.stringify(next);
+  kvSet(BLACK_MARKET_STATE_KEY, serialized);
+  _bmStateMemoRaw = serialized;
+  _bmStateMemoResult = next;
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(BLACK_MARKET_UPDATED_EVENT, { detail: next }));
   }
@@ -400,15 +417,26 @@ export function deleteBlackMarketOwnedTheater(localTheaterId: string): {
   return { ok: true, state: next, deletedTheater };
 }
 
+let _bmSessionsMemoRaw: string | null | undefined = undefined;
+let _bmSessionsMemoResult: BlackMarketSceneSession[] = [];
+
 export function loadBlackMarketSceneSessions(): BlackMarketSceneSession[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(BLACK_MARKET_SCENE_SESSIONS_KEY);
-    if (!raw) return [];
+    if (raw === _bmSessionsMemoRaw) return _bmSessionsMemoResult;
+    if (!raw) {
+      _bmSessionsMemoRaw = raw;
+      _bmSessionsMemoResult = [];
+      return _bmSessionsMemoResult;
+    }
     const parsed = JSON.parse(raw);
-    return normalizeArray(parsed, normalizeSceneSession)
+    const result = normalizeArray(parsed, normalizeSceneSession)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .slice(0, MAX_BLACK_MARKET_SCENE_SESSIONS);
+    _bmSessionsMemoRaw = raw;
+    _bmSessionsMemoResult = result;
+    return result;
   } catch {
     return [];
   }
@@ -418,7 +446,10 @@ function saveBlackMarketSceneSessions(sessions: BlackMarketSceneSession[]): Blac
   const compacted = [...sessions]
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     .slice(0, MAX_BLACK_MARKET_SCENE_SESSIONS);
-  kvSet(BLACK_MARKET_SCENE_SESSIONS_KEY, JSON.stringify(compacted));
+  const serialized = JSON.stringify(compacted);
+  kvSet(BLACK_MARKET_SCENE_SESSIONS_KEY, serialized);
+  _bmSessionsMemoRaw = serialized;
+  _bmSessionsMemoResult = compacted;
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(BLACK_MARKET_UPDATED_EVENT, { detail: loadBlackMarketState() }));
   }
@@ -603,13 +634,22 @@ function normalizeProjectionEntry(value: unknown): BlackMarketTheaterProjectionE
   return { id, sessionId, characterId, timestamp, content, theaterTitle };
 }
 
+const _bmProjectionMemo = new Map<string, { raw: string; entries: BlackMarketTheaterProjectionEntry[] }>();
+
 function loadProjectionEventsByKey(key: string): BlackMarketTheaterProjectionEntry[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(key);
-    if (!raw) return [];
+    if (!raw) {
+      _bmProjectionMemo.delete(key);
+      return [];
+    }
+    const cached = _bmProjectionMemo.get(key);
+    if (cached && cached.raw === raw) return cached.entries;
     const parsed = JSON.parse(raw);
-    return normalizeArray(parsed, normalizeProjectionEntry).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const entries = normalizeArray(parsed, normalizeProjectionEntry).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    _bmProjectionMemo.set(key, { raw, entries });
+    return entries;
   } catch {
     return [];
   }
@@ -620,7 +660,9 @@ function saveProjectionEventsByKey(key: string, entries: BlackMarketTheaterProje
   const compacted = [...entries]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
     .slice(-MAX_BLACK_MARKET_PROJECTION_EVENTS);
-  kvSet(key, JSON.stringify(compacted));
+  const serialized = JSON.stringify(compacted);
+  kvSet(key, serialized);
+  _bmProjectionMemo.set(key, { raw: serialized, entries: compacted });
   window.dispatchEvent(new CustomEvent(BLACK_MARKET_UPDATED_EVENT, { detail: loadBlackMarketState() }));
 }
 

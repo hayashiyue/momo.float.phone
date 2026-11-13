@@ -2006,6 +2006,24 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
 
   const initialThemeFetchSkippedRef = useRef(false);
 
+  // 双保险：`initialThemeAssets` 可能在挂载之后才由 MainApp 补传（例如水合失败重试、
+  // MCP 回调路径）。`useState` 的初始化器只在首挂载时读一次，不会自己更新，
+  // 这里把后来传进来的资产无损合入，避免残留白底/默认图标。
+  useEffect(() => {
+    if (!initialThemeAssets) return;
+    setThemeAssets((previous) => {
+      let changed = false;
+      const next = { ...previous };
+      for (const [id, url] of Object.entries(initialThemeAssets)) {
+        if (!url) continue;
+        if (next[id] === url) continue;
+        next[id] = url;
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [initialThemeAssets]);
+
   useEffect(() => {
     const allIds = collectThemeAssetIds(draftTheme);
     const ids = !initialThemeFetchSkippedRef.current && initialThemeAssets

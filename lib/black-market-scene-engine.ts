@@ -10,7 +10,7 @@ import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { maybeRunSummarization } from "./memory-summarizer";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import {
   appendBlackMarketSceneMessage,
   endBlackMarketSceneSession,
@@ -127,9 +127,12 @@ async function buildScenePromptMessages(session: BlackMarketSceneSession, templa
   const userName = session.userName || userIdentity?.name || "用户";
   const history = session.messages.map(message => toChatHistoryMessage(session, message));
   const memConfig = loadMemoryConfig();
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(session.characterId, { appId: BLACK_MARKET_PROMPT_APP_ID });
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(session.characterId, BLACK_MARKET_PROMPT_APP_ID, {
     userName,
     history,
+    timeline,
   });
   const [memories, coreMemories] = await Promise.all([
     retrieveMemoriesForPrompt(session.characterId, wbActivationContext, memConfig).catch(() => null),

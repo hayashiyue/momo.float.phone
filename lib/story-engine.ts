@@ -14,7 +14,7 @@ import { previewMessagesForApi, sendLLMRequestPreferStream, sendLLMStreamRequest
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
 import { parseStoryResponse } from "./story-parser";
@@ -349,6 +349,10 @@ async function buildStoryPromptMessages(
   const memConfig = loadMemoryConfig();
   const independent = Boolean(storyMemory?.independent);
   const timeAware = globalSettings?.timeAware !== false;
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const storyTimeline = independent
+    ? undefined
+    : await loadNativeTimelineAsync(characterId, { appId: "story" });
   const context = independent
     ? {
       recentBlocks: [],
@@ -361,6 +365,7 @@ async function buildStoryPromptMessages(
       history: historyMessages,
       afterTimestamp: storyMemory?.inheritRecentMemory === false ? storyMemory.startedAt : undefined,
       timeAware,
+      timeline: storyTimeline,
     });
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = context;
 

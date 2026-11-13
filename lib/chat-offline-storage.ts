@@ -46,16 +46,23 @@ function migratedSummaryKey(sessionId: string): string {
     return `${CHAT_OFFLINE_MIGRATED_SUMMARIES_PREFIX}${sessionId}`;
 }
 
+const _migratedSummaryMemo = new Map<string, { raw: string; entries: ChatOfflineProjectionEntry[] }>();
+
 function loadMigratedSummaryEntries(sessionId: string): ChatOfflineProjectionEntry[] {
     try {
-        const parsed = JSON.parse(kvGet(migratedSummaryKey(sessionId)) || "[]") as unknown;
+        const raw = kvGet(migratedSummaryKey(sessionId)) || "";
+        const cached = _migratedSummaryMemo.get(sessionId);
+        if (cached && cached.raw === raw) return cached.entries;
+        const parsed = JSON.parse(raw || "[]") as unknown;
         if (!Array.isArray(parsed)) return [];
-        return parsed.filter((item): item is ChatOfflineProjectionEntry => Boolean(
+        const result = parsed.filter((item): item is ChatOfflineProjectionEntry => Boolean(
             item && typeof item === "object"
             && typeof (item as ChatOfflineProjectionEntry).id === "string"
             && typeof (item as ChatOfflineProjectionEntry).timestamp === "string"
             && typeof (item as ChatOfflineProjectionEntry).content === "string",
         ));
+        _migratedSummaryMemo.set(sessionId, { raw, entries: result });
+        return result;
     } catch {
         return [];
     }
@@ -105,15 +112,21 @@ function normalizeTurn(value: unknown): ChatOfflineTurn | null {
     };
 }
 
+const _offlineTurnsMemo = new Map<string, { raw: string; turns: ChatOfflineTurn[] }>();
+
 export function loadChatOfflineTurns(sessionId: string): ChatOfflineTurn[] {
     try {
-        const raw = kvGet(storageKey(sessionId));
+        const raw = kvGet(storageKey(sessionId)) || "";
+        const cached = _offlineTurnsMemo.get(sessionId);
+        if (cached && cached.raw === raw) return cached.turns;
         const parsed = raw ? JSON.parse(raw) as unknown : [];
         if (!Array.isArray(parsed)) return [];
-        return parsed
+        const turns = parsed
             .map(normalizeTurn)
             .filter((turn): turn is ChatOfflineTurn => Boolean(turn))
             .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        _offlineTurnsMemo.set(sessionId, { raw, turns });
+        return turns;
     } catch {
         return [];
     }
@@ -124,11 +137,14 @@ export function saveChatOfflineTurns(sessionId: string, turns: ChatOfflineTurn[]
         .map(normalizeTurn)
         .filter((turn): turn is ChatOfflineTurn => Boolean(turn))
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    kvSet(storageKey(sessionId), JSON.stringify(normalized));
+    const serialized = JSON.stringify(normalized);
+    kvSet(storageKey(sessionId), serialized);
+    _offlineTurnsMemo.set(sessionId, { raw: serialized, turns: normalized });
 }
 
 export function clearChatOfflineTurns(sessionId: string): void {
     kvRemove(storageKey(sessionId));
+    _offlineTurnsMemo.delete(sessionId);
 }
 
 export function appendChatOfflineTurn(input: {

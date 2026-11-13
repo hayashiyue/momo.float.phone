@@ -81,14 +81,21 @@ function cleanEventText(value: unknown, maxLength: number): string {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+const _checkPhoneEventsMemo = new Map<string, { raw: string; entries: CheckPhoneProjectionEntry[] }>();
+
 function loadProjectionEventsByKey(key: string): CheckPhoneProjectionEntry[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(key);
-    if (!raw) return [];
+    if (!raw) {
+      _checkPhoneEventsMemo.delete(key);
+      return [];
+    }
+    const cached = _checkPhoneEventsMemo.get(key);
+    if (cached && cached.raw === raw) return cached.entries;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const entries = parsed
       .filter((entry): entry is CheckPhoneProjectionEntry =>
         entry
         && typeof entry.id === "string"
@@ -98,6 +105,8 @@ function loadProjectionEventsByKey(key: string): CheckPhoneProjectionEntry[] {
         && typeof entry.content === "string"
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    _checkPhoneEventsMemo.set(key, { raw, entries });
+    return entries;
   } catch {
     return [];
   }
@@ -108,7 +117,9 @@ function saveProjectionEventsByKey(key: string, entries: CheckPhoneProjectionEnt
   const compacted = [...entries]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
     .slice(-MAX_CHECKPHONE_EVENTS_PER_CHARACTER);
-  kvSet(key, JSON.stringify(compacted));
+  const serialized = JSON.stringify(compacted);
+  kvSet(key, serialized);
+  _checkPhoneEventsMemo.set(key, { raw: serialized, entries: compacted });
 }
 
 function recordCheckPhoneSnapshotEvent(snapshot: CheckPhoneSnapshot): void {

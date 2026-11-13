@@ -66,14 +66,21 @@ function formatAuthorLabel(
   return authorType === "user" ? `“${name}”（用户的小红书账号）` : `“${name}”`;
 }
 
+const _xhsEventsMemo = new Map<string, { raw: string; entries: XiaohongshuProjectionEntry[] }>();
+
 function loadEventsByKey(key: string): XiaohongshuProjectionEntry[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(key);
-    if (!raw) return [];
+    if (!raw) {
+      _xhsEventsMemo.delete(key);
+      return [];
+    }
+    const cached = _xhsEventsMemo.get(key);
+    if (cached && cached.raw === raw) return cached.entries;
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const entries = parsed
       .filter((entry): entry is XiaohongshuProjectionEntry =>
         entry
         && typeof entry.id === "string"
@@ -81,6 +88,8 @@ function loadEventsByKey(key: string): XiaohongshuProjectionEntry[] {
         && typeof entry.content === "string"
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    _xhsEventsMemo.set(key, { raw, entries });
+    return entries;
   } catch {
     return [];
   }
@@ -95,7 +104,9 @@ function saveEventsByKey(key: string, events: XiaohongshuProjectionEntry[]): voi
   const compacted = [...events]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
     .slice(-MAX_EVENTS_PER_CHARACTER);
-  kvSet(key, JSON.stringify(compacted));
+  const serialized = JSON.stringify(compacted);
+  kvSet(key, serialized);
+  _xhsEventsMemo.set(key, { raw: serialized, entries: compacted });
 }
 
 function saveEvents(characterId: string, events: XiaohongshuProjectionEntry[]): void {

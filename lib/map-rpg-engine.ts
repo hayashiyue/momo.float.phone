@@ -12,7 +12,7 @@ import { assemblePromptPayload, type LLMMessage } from "./llm-prompt-assembler";
 import { retrieveMemoriesForPrompt, retrieveCoreMemoriesForPrompt } from "./memory-service";
 import { formatLongTermMemories, formatCoreMemories } from "./memory-injector";
 import { loadMemoryConfig } from "./memory-storage";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
 import { estimateTokens } from "./token-counter";
@@ -1034,8 +1034,10 @@ async function buildCompanionDeclarePromptPayload(
     { id: "adv_declare", sessionId: "", role: "user" as const, content: historyContent, status: "sent" as const, createdAt: new Date().toISOString() },
   ];
 
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(characterId, { appId: "adventure" });
   const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(
-    characterId, "adventure", { history, userName: userIdentity?.name }
+    characterId, "adventure", { history, userName: userIdentity?.name, timeline }
   );
 
   const memConfig = loadMemoryConfig();

@@ -218,31 +218,27 @@ function preloadImageDataUrl(url: string): Promise<void> {
   });
 }
 
-// 首屏只读一次 KV 资产 + 预解码壁纸，限时 600ms 快速放行；
-// 原来 1500ms 在冷启动时叠加账号校验与 KV 水合，会表现为长时间白屏。
-const FIRST_PAINT_PRELOAD_TIMEOUT_MS = 600;
-// 壁纸解码单独再限时 240ms：大图 decode 在低端机可能耗秒级，不能让它独吞整个首屏预算。
+// 壁纸解码单独限时 240ms：大图 decode 在低端机可能耗秒级，不能让它独吞首屏预算。
+// 资产读取本身不再设超时（超时放行空 assets 正是「进主页闪初始白底」的根因）。
 const WALLPAPER_DECODE_TIMEOUT_MS = 240;
 
 async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme> {
   const profile = readThemeProfile();
   const assetIds = collectFirstPaintThemeAssetIds(profile);
-  let assets: Record<string, string> = {};
-  await Promise.race([
-    (async () => {
-      assets = assetIds.length ? await getThemeAssetMap(assetIds) : {};
-      // 只预解码壁纸：图标皮肤 / 字体 / Dock 皮肤的 data URL 交给浏览器按需解码。
-      // 原来是对全部资产逐个 await decode()，冷启动时会额外等数百毫秒到数秒（白屏主因之一）。
-      const wallpaperUrl = profile.wallpaperAssetId ? assets[profile.wallpaperAssetId] : undefined;
-      if (!wallpaperUrl) return;
-      // 壁纸解码自身再限时：大图 decode 在低端机可能耗时秒级，不能独吞整个首屏预算。
-      await Promise.race([
-        preloadImageDataUrl(wallpaperUrl),
-        new Promise<void>((resolve) => window.setTimeout(resolve, WALLPAPER_DECODE_TIMEOUT_MS)),
-      ]);
-    })(),
-    new Promise<void>((resolve) => window.setTimeout(resolve, FIRST_PAINT_PRELOAD_TIMEOUT_MS)),
-  ]);
+  // 资产读取必须完整拿到，不能用 Promise.race 放行空 assets：
+  // 否则 DesktopShell 首帧拿到 {}，壁纸取不到就渲染白底 + 默认初始图标，
+  // 等 getThemeAssetMap 的异步回调到了再"啪"一下替换成真实主题（用户看到的"闪一下"）。
+  // 这里只读 KV 资产（单事务按主键批量读），本身只需几十毫秒，不对它设超时。
+  const assets: Record<string, string> = assetIds.length ? await getThemeAssetMap(assetIds) : {};
+  // 壁纸预解码改为后台预热，不阻塞首屏主题就绪：大图 decode 在低端机可能耗时秒级，
+  // 就算超时也不影响主题正确性（浏览器会在真正绘制时自行解码）。
+  const wallpaperUrl = profile.wallpaperAssetId ? assets[profile.wallpaperAssetId] : undefined;
+  if (wallpaperUrl) {
+    void Promise.race([
+      preloadImageDataUrl(wallpaperUrl),
+      new Promise<void>((resolve) => window.setTimeout(resolve, WALLPAPER_DECODE_TIMEOUT_MS)),
+    ]).catch(() => undefined);
+  }
   return { profile, assets };
 }
 
@@ -272,20 +268,24 @@ export function MainApp() {
       setKvHydrateFailed(false);
 
       if (cancelled) return;
-      // 先放行进入，再做首屏主题预取：DesktopShell 只有在用户点「进入」后才会挂载，
-      // 把 hydrated 卡在主题预取后面等于白白多堵 240~600ms（冷启动叠加 KV 水合后
-      // 表现为「等半天进不去」）。预取完成后再补一次状态，赶在用户点进入前生效。
-      setHydrated(true);
-      if (hasPendingMcpOAuthCallback()) {
-        setSplashDismissed(true);
-      }
-
+      // 必须先拿到首屏主题资产，再放行进入。
+      // 旧顺序是 setHydrated(true) 在前、await 主题预取在后，形成竞态：
+      // DesktopShell 挂载时 preparedDesktopTheme 还是 null，首帧拿到空 assets，
+      // 于是先渲染白底 + 默认图标，等 IDB 回调回来再二次渲染替换（用户看到的"闪一下"）。
+      // 现在资产读取（不含耗时的壁纸解码）只花几十毫秒，作为进入的前置条件感知不到，
+      // 但能让首帧就是正确主题。
       try {
         const nextPreparedTheme = await prepareDesktopThemeForFirstPaint();
         if (cancelled) return;
         setPreparedDesktopTheme(nextPreparedTheme);
       } catch (error) {
         console.warn("[MainApp] desktop theme preload failed:", error);
+      }
+
+      if (cancelled) return;
+      setHydrated(true);
+      if (hasPendingMcpOAuthCallback()) {
+        setSplashDismissed(true);
       }
     })();
 

@@ -7,7 +7,7 @@ import type { ApiConfig, PresetConfig, RegexConfig, WorldBookConfig } from "./se
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { formatDiaryEntryContext, parseDiaryEntryContent, type ParsedDiaryEntry } from "./diary-entry-utils";
 import type { DiaryEntry, DiaryEntryTrigger } from "./diary-entry-types";
 import { beginDiaryGeneration, endDiaryGeneration } from "./diary-generating-tracker";
@@ -54,7 +54,9 @@ async function resolveDiaryEntryGeneration(
   const userIdentity = resolveUserIdentity(character.id, "diary");
   const userName = userIdentity?.name ?? "用户";
   const memConfig = loadMemoryConfig();
-  const prepared = prepareShortTermContext(character.id, "diary", { history: [] });
+  // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
+  const timeline = await loadNativeTimelineAsync(character.id, { appId: "diary" });
+  const prepared = prepareShortTermContext(character.id, "diary", { history: [], timeline });
 
   const [memories, coreMemories] = await Promise.all([
     retrieveMemoriesForPrompt(character.id, prepared.wbActivationContext, memConfig).catch(() => []),

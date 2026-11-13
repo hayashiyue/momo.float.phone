@@ -782,10 +782,26 @@ export function loadStorySessions(): StorySession[] {
   return [..._sessionsCache].sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
 }
 
+// loadStoryProjectionEntries 会对每个会话调一次 loadStoryMessages，
+// 原实现每次都全表 filter + sort（O(n log n)），剧情消息一多就成了瓶颈。
+// 这里按会话分桶缓存，并用 _messagesCache 引用 + 长度校验失效（与 chat-storage 同思路）。
+const _storyMessagesBySessionMemo = new Map<string, StoryMessage[]>();
+let _storyMessagesMemoSource: StoryMessage[] | null = null;
+let _storyMessagesMemoCount = -1;
+
 export function loadStoryMessages(sessionId: string): StoryMessage[] {
-  return _messagesCache
+  if (_messagesCache !== _storyMessagesMemoSource || _messagesCache.length !== _storyMessagesMemoCount) {
+    _storyMessagesBySessionMemo.clear();
+    _storyMessagesMemoSource = _messagesCache;
+    _storyMessagesMemoCount = _messagesCache.length;
+  }
+  const cached = _storyMessagesBySessionMemo.get(sessionId);
+  if (cached) return cached;
+  const messages = _messagesCache
     .filter((message) => message.sessionId === sessionId)
     .sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+  _storyMessagesBySessionMemo.set(sessionId, messages);
+  return messages;
 }
 
 export type CreateStorySessionOptions = {
@@ -932,19 +948,36 @@ function sanitizeStoryGroup(raw: unknown): StoryGroup | null {
   };
 }
 
+let _storyGroupsMemoRaw: string | null | undefined = undefined;
+let _storyGroupsMemoResult: StoryGroup[] = [];
+
 export function loadStoryGroups(): StoryGroup[] {
   try {
-    const raw = JSON.parse(kvGet(STORY_GROUPS_KEY) || "[]");
+    const rawText = kvGet(STORY_GROUPS_KEY) || "[]";
+    if (rawText === _storyGroupsMemoRaw) return _storyGroupsMemoResult;
+    const raw = JSON.parse(rawText);
     if (!Array.isArray(raw)) return [];
-    return raw.map(sanitizeStoryGroup).filter((item): item is StoryGroup => item !== null)
+    const result = raw.map(sanitizeStoryGroup).filter((item): item is StoryGroup => item !== null)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    _storyGroupsMemoRaw = rawText;
+    _storyGroupsMemoResult = result;
+    return result;
   } catch {
     return [];
   }
 }
 
 export function saveStoryGroups(groups: StoryGroup[]): void {
-  kvSet(STORY_GROUPS_KEY, JSON.stringify(groups.map(sanitizeStoryGroup).filter(Boolean)));
+  // 只跑一次 sanitize + sort：写进 KV 的与写进缓存的是同一份已排序结果，
+  // 避免原来两次 map 且「KV 存未排序、缓存存已排序」的不一致。
+  const normalized = groups
+    .map(sanitizeStoryGroup)
+    .filter((item): item is StoryGroup => item !== null)
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const serialized = JSON.stringify(normalized);
+  kvSet(STORY_GROUPS_KEY, serialized);
+  _storyGroupsMemoRaw = serialized;
+  _storyGroupsMemoResult = normalized;
 }
 
 export function createStoryGroup(characterIds: string[], name?: string): StoryGroup {
@@ -1011,6 +1044,8 @@ export function pushStoryMessage(
     createdAt: new Date().toISOString(),
   };
   _messagesCache.push(message);
+  // 长度校验虽能捕捉到 push，但显式清空更稳妥，避免同一长度的原地替换漏掉。
+  _storyMessagesBySessionMemo.clear();
   storyDb.messages.put(message).catch(() => undefined);
 
   const previewSource = message.renderedContent || message.rawContent;
@@ -1043,6 +1078,7 @@ export function saveStoryLaunchTarget(session: StorySession): void {
 /** Delete a single story message */
 export function deleteStoryMessage(messageId: string): void {
     _messagesCache = _messagesCache.filter(m => m.id !== messageId);
+    _storyMessagesBySessionMemo.clear();
     storyDb.messages.delete(messageId).catch(() => undefined);
 }
 
@@ -1054,6 +1090,7 @@ export function deleteStoryMessagesFrom(sessionId: string, messageId: string): v
         .filter(m => m.sessionId === sessionId && m.createdAt >= msg.createdAt)
         .map(m => m.id);
     _messagesCache = _messagesCache.filter(m => !idsToDelete.includes(m.id));
+    _storyMessagesBySessionMemo.clear();
     storyDb.messages.bulkDelete(idsToDelete).catch(() => undefined);
 }
 
@@ -1068,12 +1105,15 @@ export function editStoryMessage(messageId: string, newRawContent: string): void
         regexSignature: undefined,
         parserVersion: undefined,
     };
+    // 原地替换元素不会改变数组引用与长度，分桶缓存不会自动失效，必须显式清空。
+    _storyMessagesBySessionMemo.clear();
     storyDb.messages.put(_messagesCache[idx]).catch(() => undefined);
 }
 
 export function replaceStoryMessages(sessionId: string, messages: StoryMessage[]): void {
   _messagesCache = _messagesCache.filter((message) => message.sessionId !== sessionId);
   _messagesCache.push(...messages);
+  _storyMessagesBySessionMemo.clear();
   storyDb.messages.where("sessionId").equals(sessionId).delete()
     .then(() => storyDb.messages.bulkPut(messages))
     .catch(() => undefined);

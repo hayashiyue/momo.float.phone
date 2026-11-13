@@ -48,14 +48,21 @@ function cleanText(value: unknown, maxLength: number): string {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
 }
 
+const _cocreateEventsMemo = new Map<string, { raw: string; entries: CoCreateProjectionEntry[] }>();
+
 function loadEventsByKey(key: string): CoCreateProjectionEntry[] {
   if (typeof window === "undefined") return [];
   try {
     const raw = kvGet(key);
-    if (!raw) return [];
+    if (!raw) {
+      _cocreateEventsMemo.delete(key);
+      return [];
+    }
+    const cached = _cocreateEventsMemo.get(key);
+    if (cached && cached.raw === raw) return cached.entries;
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed
+    const entries = parsed
       .filter((entry): entry is CoCreateProjectionEntry =>
         Boolean(entry)
         && typeof (entry as Partial<CoCreateProjectionEntry>).id === "string"
@@ -64,6 +71,8 @@ function loadEventsByKey(key: string): CoCreateProjectionEntry[] {
         && typeof (entry as Partial<CoCreateProjectionEntry>).content === "string"
       )
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    _cocreateEventsMemo.set(key, { raw, entries });
+    return entries;
   } catch {
     return [];
   }
@@ -74,7 +83,9 @@ function saveEventsByKey(key: string, events: CoCreateProjectionEntry[]): void {
   const compacted = [...events]
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
     .slice(-MAX_COCREATE_EVENTS);
-  kvSet(key, JSON.stringify(compacted));
+  const serialized = JSON.stringify(compacted);
+  kvSet(key, serialized);
+  _cocreateEventsMemo.set(key, { raw: serialized, entries: compacted });
 }
 
 export function recordCoCreateProjectionEvent(input: RecordCoCreateProjectionInput): CoCreateProjectionEntry | null {
