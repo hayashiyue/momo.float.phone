@@ -1,0 +1,207 @@
+const CACHE_VERSION = "ai-phone-pwa-v15";
+const NAVIGATE_FETCH_TIMEOUT_MS = 1800;
+const ASSET_FETCH_TIMEOUT_MS = 8000;
+
+function fetchWithSwTimeout(request, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(request, { signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+const STATIC_CACHE = `${CACHE_VERSION}-static`;
+const RUNTIME_CACHE = `${CACHE_VERSION}-runtime`;
+
+// 注意：本项目实际使用的是 /manifest.webmanifest（见 app/layout.tsx），
+// 此前写 /manifest.json 会 404 导致 cache.addAll 整批失败、"/" 根本没存进预缓存！
+const PRECACHE_URLS = [
+  "/",
+  "/manifest.webmanifest",
+  "/icon-192.png",
+  "/icon-512.png",
+];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(STATIC_CACHE)
+      .then((cache) => Promise.allSettled(PRECACHE_URLS.map((url) => cache.add(url))))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then((keys) => Promise.all(
+        keys
+          .filter((key) => !key.startsWith(CACHE_VERSION))
+          .map((key) => caches.delete(key))
+      ))
+      // 刷新预缓存的 "/" 快照：它是离线导航的最终兜底，若停留在旧部署版本，
+      // 引用的旧 hash CSS/JS 已 404，会渲染出无样式页面（文字堆在左上角）。
+      .then(() => caches.open(STATIC_CACHE))
+      .then((cache) => cache.add(new Request("/", { cache: "reload" })).catch(() => {}))
+      .then(() => self.clients.claim())
+  );
+});
+
+function isCacheableRequest(request) {
+  if (request.method !== "GET") return false;
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin) return false;
+  if (url.pathname.startsWith("/api/")) return false;
+  if (url.pathname.startsWith("/_next/static/")) return true;
+  return ["font", "image", "script", "style", "worker"].includes(request.destination);
+}
+
+async function networkFirst(request) {
+  const cache = await caches.open(RUNTIME_CACHE);
+  const cached = (await cache.match(request, { ignoreSearch: true }))
+    || (await caches.match("/", { ignoreSearch: true }));
+
+  // 缓存优先：只要本地有旧壳就 0 毫秒直接返回，绝不等网络。
+  // 原实现是「先等网络 1.8 秒再回退」，而 iOS WebKit 上 AbortController.abort()
+  // 未必能中断已在进行的底层导航，.vercel.app 在国内握手黑洞时照样会等满
+  // CFNetwork 的 60 秒，这才是「打开要一分多钟纯白屏」的真正来源。
+  if (cached) {
+    // 后台静默更新，不阻塞返回；失败也不影响本次打开。
+    fetchWithSwTimeout(request, ASSET_FETCH_TIMEOUT_MS)
+      .then((response) => { if (response.ok) cache.put(request, response.clone()); })
+      .catch(() => {});
+    return cached;
+  }
+
+  // 本地完全没缓存（首次安装）：只能等网络。
+  try {
+    const response = await fetchWithSwTimeout(request, NAVIGATE_FETCH_TIMEOUT_MS);
+    if (response.ok) cache.put(request, response.clone());
+    return response;
+  } catch (error) {
+    const fallback = await caches.match("/", { ignoreSearch: true });
+    if (fallback) return fallback;
+    throw error;
+  }
+}
+
+// 静态资源（字体/图片/脚本/样式/模型）用 cache-first：命中缓存直接返回，
+// 不再每次都在后台把整份文件重新拉一遍校验。字体动辄 7~24MB，旧的
+// stale-while-revalidate 会持续重下，是带宽爆掉的主因之一。
+// 需要更新缓存内容时，升 CACHE_VERSION 即可让旧缓存在 activate 时清空。
+async function cacheFirst(request) {
+  const cache = await caches.open(RUNTIME_CACHE);
+  const cached = await cache.match(request);
+  if (cached) return cached;
+  const response = await fetchWithSwTimeout(request, ASSET_FETCH_TIMEOUT_MS);
+  if (response.ok) cache.put(request, response.clone());
+  return response;
+}
+
+// 离线推送：App 被杀后由系统唤起 SW 弹通知。payload 由服务端 JSON 编码。
+self.addEventListener("push", (event) => {
+  let data = {};
+  try {
+    data = event.data ? event.data.json() : {};
+  } catch (error) {
+    data = { body: event.data ? event.data.text() : "" };
+  }
+  const declarative = data.web_push === 8030 && data.notification && typeof data.notification === "object"
+    ? data.notification
+    : null;
+  const notificationData = declarative && declarative.data && typeof declarative.data === "object"
+    ? declarative.data
+    : data;
+  const title = (declarative && declarative.title) || data.title || "小手机";
+  event.waitUntil((async () => {
+    if (notificationData.type === "chat_outbox") {
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      const visible = windows.filter((client) => client.visibilityState === "visible");
+      if (visible.length > 0) {
+        visible.forEach((client) => client.postMessage({ type: "push_outbox_ready" }));
+        return;
+      }
+    }
+    // 来电推送：页面可见时直接进页面振铃（来电横幅），不弹系统通知
+    if (notificationData.type === "incoming_call") {
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      const visible = windows.filter((client) => client.visibilityState === "visible");
+      if (visible.length > 0) {
+        visible.forEach((client) => client.postMessage({
+          type: "incoming_call_push",
+          sessionId: notificationData.sessionId || "",
+          callTs: notificationData.callTs || 0,
+        }));
+        visible.forEach((client) => client.postMessage({ type: "push_outbox_ready" }));
+        return;
+      }
+    }
+    await self.registration.showNotification(title, {
+      body: (declarative && declarative.body) || data.body || "",
+      icon: (declarative && declarative.icon) || data.icon || "/icon-192.png",
+      badge: (declarative && declarative.badge) || "/icon-192.png",
+      tag: (declarative && declarative.tag) || data.tag || `push-${Date.now()}`,
+      data: {
+        url: (declarative && declarative.navigate) || notificationData.url || "/",
+        type: notificationData.type || "",
+        commandId: notificationData.commandId || "",
+        sessionId: notificationData.sessionId || "",
+        callTs: notificationData.callTs || 0,
+      },
+    });
+  })());
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const notificationData = event.notification.data || {};
+  const targetUrl = notificationData.url || "/";
+  if (notificationData.type === "shortcut_command") {
+    // iOS silently ignores custom URL schemes passed to clients.openWindow().
+    event.waitUntil((async () => {
+      const absoluteUrl = new URL(targetUrl, self.location.origin).href;
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      // 有活窗口：不导航（navigate 会杀掉 SPA，回来一片空白、进行中的生成全断）。
+      // 交给页面自己 location 到 /shortcut-run——302 到 shortcuts:// 属于外部 App
+      // 启动，WebKit 不会卸载当前页面，聊天界面与本地生成原地保留。
+      for (const client of windows) {
+        if ("focus" in client) {
+          client.postMessage({ type: "run_shortcut", url: absoluteUrl });
+          return client.focus();
+        }
+      }
+      // App 已被杀：没有页面可保，开新窗口走 /shortcut-run 跳转
+      return self.clients.openWindow(absoluteUrl);
+    })());
+    return;
+  }
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const client of clients) {
+        if ("focus" in client) {
+          if (notificationData.type === "chat_outbox") {
+            client.postMessage({ type: "push_outbox_ready" });
+          }
+          if (notificationData.type === "incoming_call") {
+            // 有活窗口：不导航（会杀掉 SPA），交给页面弹来电横幅 + 合并 outbox
+            client.postMessage({
+              type: "incoming_call_push",
+              sessionId: notificationData.sessionId || "",
+              callTs: notificationData.callTs || 0,
+            });
+            client.postMessage({ type: "push_outbox_ready" });
+          }
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow(targetUrl);
+    })
+  );
+});
+
+self.addEventListener("fetch", (event) => {
+  const { request } = event;
+  if (request.mode === "navigate") {
+    event.respondWith(networkFirst(request));
+    return;
+  }
+  if (isCacheableRequest(request)) {
+    event.respondWith(cacheFirst(request));
+  }
+});

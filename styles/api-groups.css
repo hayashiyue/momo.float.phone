@@ -1,0 +1,127 @@
+/* API 文件夹（设置页 & 快捷面板共用） */
+.api-group-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.api-group-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: 18px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.62);
+  padding: 10px 12px;
+  transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+
+.api-group-section[data-drop-over="true"],
+.api-ungrouped-zone[data-drop-over="true"] {
+  border-color: #111827;
+  background: rgba(17, 24, 39, 0.06);
+  box-shadow: 0 0 0 2px rgba(17, 24, 39, 0.12);
+}
+
+.api-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  user-select: none;
+}
+
+.api-group-title-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  font-size: calc(13.5px * var(--app-text-scale, 1));
+  font-weight: 700;
+  color: var(--c-text-title, #111827);
+  text-align: left;
+  cursor: pointer;
+}
+
+.api-group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.07);
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(15, 23, 42, 0.6);
+}
+
+.api-group-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.api-group-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: rgba(15, 23, 42, 0.55);
+  cursor: pointer;
+}
+
+.api-group-icon-btn:hover {
+  background: rgba(15, 23, 42, 0.06);
+  color: #111827;
+}
+
+.api-group-icon-btn[data-variant="danger"]:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #dc2626;
+}
+
+.api-ungrouped-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: 18px;
+  border: 1px dashed transparent;
+  padding: 4px;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.api-drag-ghost {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  transform: translate(-50%, -120%);
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.92);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.22);
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ui-config-card[data-dragging="true"] {
+  opacity: 0.42;
+  transform: scale(0.97);
+}
