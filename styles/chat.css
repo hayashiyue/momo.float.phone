@@ -6390,9 +6390,12 @@
   gap: 12px;
   min-height: 66px;
   padding: 11px 12px;
-  border: 0;
+  /* 注意：--c-surface / --c-primary 在本项目并不存在（色板见 styles/tokens.css）。
+     这里必须带 fallback，否则整条 background 声明失效 → 横幅底色全透明、
+     在任何页面顶部弹起都「看不见」。 */
+  border: 1px solid var(--c-card-border, rgba(15, 23, 42, 0.08));
   border-radius: 18px;
-  background: color-mix(in srgb, var(--c-surface) 88%, white 12%);
+  background: color-mix(in srgb, var(--c-surface, var(--c-panel, #ffffff)) 88%, white 12%);
   color: var(--c-text);
   box-shadow: 0 10px 28px rgba(15, 23, 42, 0.2);
   backdrop-filter: blur(var(--ui-blur));
@@ -6427,8 +6430,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--c-primary) 16%, var(--c-surface));
-  color: var(--c-primary);
+  background: color-mix(in srgb, var(--c-primary, var(--c-icon-active, #4A4A4A)) 16%, var(--c-surface, var(--c-panel, #ffffff)));
+  color: var(--c-primary, var(--c-icon-active, #4A4A4A));
   font-size: calc(15px*var(--app-text-scale,1));
   font-weight: 700;
 }
@@ -6463,8 +6466,8 @@
 .chat-message-notice-action {
   flex-shrink: 0;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--c-primary) 14%, transparent);
-  color: var(--c-primary);
+  background: color-mix(in srgb, var(--c-primary, var(--c-icon-active, #4A4A4A)) 14%, transparent);
+  color: var(--c-primary, var(--c-icon-active, #4A4A4A));
   padding: 6px 10px;
   font-size: calc(11px*var(--app-text-scale,1));
   font-weight: 700;

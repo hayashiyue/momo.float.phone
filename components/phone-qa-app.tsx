@@ -894,9 +894,10 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
     [snapshot.sessions, snapshot.activeSessionId],
   );
   const allMessages = useMemo(() => activeSession?.messages ?? [], [activeSession]);
-  const [visibleMsgLimit, setVisibleMsgLimit] = useState(24);
+  // 工坊首页气泡数：只渲染最近 12 条，上滑再按批补载（原先 24 条一次全渲染）
+  const [visibleMsgLimit, setVisibleMsgLimit] = useState(12);
   useEffect(() => {
-    setVisibleMsgLimit(24);
+    setVisibleMsgLimit(12);
   }, [snapshot.activeSessionId]);
   const messages = useMemo(
     () => (allMessages.length > visibleMsgLimit ? allMessages.slice(-visibleMsgLimit) : allMessages),
@@ -934,7 +935,7 @@ export function PhoneQaApp({ onClose, onNotice }: PhoneQaAppProps) {
       setVisibleMsgLimit((current) => {
         if (allMessages.length <= current) return current;
         pendingPrependRef.current = { prevScrollHeight: el.scrollHeight, prevScrollTop: el.scrollTop };
-        return Math.min(allMessages.length, current + 24);
+        return Math.min(allMessages.length, current + 12);
       });
     }
   }, [allMessages.length]);

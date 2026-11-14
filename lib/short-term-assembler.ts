@@ -191,7 +191,9 @@ function* assembleNativeTimeline(
     let processedMessages = 0;
     const allowed = options?.allowedSources;
     const isSourceAllowed = (key: string): boolean => !allowed || (allowed as Record<string, boolean | undefined>)[key] !== false;
-    const maxMsgs = options?.maxMessagesPerSession && options.maxMessagesPerSession > 0 ? options.maxMessagesPerSession : 600;
+    // 未显式指定时不再默认扫 600 条：超出短期 token 预算的远古记录最终都会被
+    // 统一截断丢弃，先格式化再丢弃纯属白烧主线程。群聊 etc. 未传该参数的调用走 120。
+    const maxMsgs = options?.maxMessagesPerSession && options.maxMessagesPerSession > 0 ? options.maxMessagesPerSession : 120;
     const chars = loadCharacters();
     const userName = options?.userName ?? resolveUserIdentity(characterId, options?.appId)?.name ?? "用户";
     const charName = chars.find(c => c.id === characterId)?.name ?? "角色";
@@ -438,7 +440,7 @@ function* assembleNativeTimeline(
     // ── Moments posts & comments (grouped by post) ──
     // Each post + its comments become ONE timeline entry.
     const allPosts = isSourceAllowed("moments") ? loadMomentPosts() : [];
-    const posts = allPosts.length > 100 ? allPosts.slice(0, 100) : allPosts;
+    const posts = allPosts.length > 30 ? allPosts.slice(0, 30) : allPosts;
     for (const post of posts) {
         if (++processedMessages % 400 === 0) yield;
         if (!canCharacterSeeMomentPost(post, characterId)) continue;
@@ -1036,7 +1038,10 @@ export function prepareShortTermContext(
     const timeAware = resolvePromptTimeAware(options?.timeAware);
     const memConfig = loadMemoryConfig();
     const budget = memConfig.shortTermTokenBudget;
-    const maxMessagesPerSession = budget > 0 ? Math.max(400, Math.min(1500, Math.ceil(budget / 4))) : 800;
+    // 保底 400 的旧逻辑会让每次发消息都把每个聊天室各扫 400 条再格式化、算 token，
+    // 而下方按 token 预算倒序累加、满 20 条即 break，绝大多数结果算完就被丢弃。
+    // 这里随 budget 伸缩并压到 120~400，扫描量砍掉七成，语义（预算内进池）不变。
+    const maxMessagesPerSession = budget > 0 ? Math.max(120, Math.min(400, Math.ceil(budget / 8))) : 150;
     let timeline = options?.timeline
         ? filterTimelineByAllowedSources(options.timeline, memConfig.shortTermAllowedSources)
         : filterTimelineByAllowedSources(

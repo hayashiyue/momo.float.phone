@@ -20,8 +20,8 @@ import type { ChineseThinkingPromptLength } from "./chinese-thinking-prompt";
 
 export const DEFAULT_VISION_IMAGE_PROMPT_LIMIT = 1;
 export const MAX_VISION_IMAGE_PROMPT_LIMIT = 20;
-export const CHAT_INITIAL_VISIBLE_MESSAGE_COUNT = 50;
-export const CHAT_LOAD_MORE_MESSAGE_COUNT = 30;
+export const CHAT_INITIAL_VISIBLE_MESSAGE_COUNT = 20;
+export const CHAT_LOAD_MORE_MESSAGE_COUNT = 20;
 
 export function normalizeVisionImagePromptLimit(value: unknown): number {
     if (value === undefined || value === null || value === "") return DEFAULT_VISION_IMAGE_PROMPT_LIMIT;

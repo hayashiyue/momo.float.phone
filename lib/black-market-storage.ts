@@ -318,21 +318,19 @@ export function createDefaultBlackMarketState(): BlackMarketState {
 }
 
 // 黑市状态里 ownedTheaters 每条都带 openingHtml（上限 6 万字）、aiInstruction（3 万字）、
-// renderCss（2 万字），最多 200 条；getActiveBlackMarketTheaterForChat 的 state 又是默认参数，
-// 聊天链路每次检查有没有激活中的剧场都会全量 parse 一遍。这里按原始字符串引用比对缓存。
-let _bmStateMemoRaw: string | null | undefined = undefined;
-let _bmStateMemoResult: BlackMarketState | null = null;
+// renderCss（2 万字），最多 200 条——缓存整个 BlackMarketState 等于让全部已购剧场正文
+// 常驻 JS 堆，后台极易被 iOS Jetsam 强杀。
+// 但聊天链路 getActiveBlackMarketTheaterForChat 每次都要查「有没有激活中的剧场」，
+// 又不能每次全量 parse。折衷：整包状态按需解析，只为这条热路径留一份**轻量**索引
+// （仅 activeTheaters，不含任何剧场正文，最多 20 条）。
+let _bmActiveMemoRaw: string | null | undefined = undefined;
+let _bmActiveMemoResult: ActiveBlackMarketTheater[] | null = null;
 
 export function loadBlackMarketState(): BlackMarketState {
   if (typeof window === "undefined") return createDefaultBlackMarketState();
   try {
     const raw = kvGet(BLACK_MARKET_STATE_KEY);
-    if (!raw) {
-      _bmStateMemoRaw = raw;
-      _bmStateMemoResult = null;
-      return createDefaultBlackMarketState();
-    }
-    if (raw === _bmStateMemoRaw && _bmStateMemoResult) return _bmStateMemoResult;
+    if (!raw) return createDefaultBlackMarketState();
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const result: BlackMarketState = {
       wallet: normalizeWallet(parsed.wallet),
@@ -340,8 +338,6 @@ export function loadBlackMarketState(): BlackMarketState {
       activeTheaters: normalizeArray(parsed.activeTheaters, normalizeActiveTheater).slice(0, 20),
       updatedAt: cleanText(parsed.updatedAt, 80) || new Date().toISOString(),
     };
-    _bmStateMemoRaw = raw;
-    _bmStateMemoResult = result;
     return result;
   } catch {
     return createDefaultBlackMarketState();
@@ -363,8 +359,9 @@ export function saveBlackMarketState(state: BlackMarketState): BlackMarketState 
   };
   const serialized = JSON.stringify(next);
   kvSet(BLACK_MARKET_STATE_KEY, serialized);
-  _bmStateMemoRaw = serialized;
-  _bmStateMemoResult = next;
+  // 写入后同步刷新轻量索引（重新载入即等于读到自己刚写的状态）
+  _bmActiveMemoRaw = serialized;
+  _bmActiveMemoResult = next.activeTheaters;
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(BLACK_MARKET_UPDATED_EVENT, { detail: next }));
   }
@@ -392,8 +389,34 @@ export function getOwnedBlackMarketTheaters(state = loadBlackMarketState()): Bla
   return state.ownedTheaters;
 }
 
-export function getActiveBlackMarketTheaterForChat(chatId: string, state = loadBlackMarketState()): ActiveBlackMarketTheater | undefined {
-  return state.activeTheaters.find(item => item.chatId === chatId && item.status === "active");
+/**
+ * 只取 activeTheaters 的轻量读法：命中缓存直接返回（缓存里只有当前激活中的剧场，
+ * 不含 ownedTheaters 的巨量正文），未命中才解析整包并只保留 activeTheaters。
+ */
+export function loadActiveBlackMarketTheaters(): ActiveBlackMarketTheater[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = kvGet(BLACK_MARKET_STATE_KEY);
+    if (!raw) {
+      _bmActiveMemoRaw = raw;
+      _bmActiveMemoResult = null;
+      return [];
+    }
+    if (raw === _bmActiveMemoRaw && _bmActiveMemoResult) return _bmActiveMemoResult;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const active = normalizeArray(parsed.activeTheaters, normalizeActiveTheater).slice(0, 20);
+    _bmActiveMemoRaw = raw;
+    _bmActiveMemoResult = active;
+    return active;
+  } catch {
+    return [];
+  }
+}
+
+export function getActiveBlackMarketTheaterForChat(chatId: string, state?: BlackMarketState): ActiveBlackMarketTheater | undefined {
+  // 显式传入 state 时按传入的算（保存流程里用）；缺省走轻量索引，避免解析整包
+  const activeTheaters = state ? state.activeTheaters : loadActiveBlackMarketTheaters();
+  return activeTheaters.find(item => item.chatId === chatId && item.status === "active");
 }
 
 export function deleteBlackMarketOwnedTheater(localTheaterId: string): {

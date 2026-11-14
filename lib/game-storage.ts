@@ -246,22 +246,20 @@ function createDefaultGameState(): GameState {
   };
 }
 
-// 游戏状态是短期记忆链路上的重灾区：installedGames 里存着每个已安装小游戏的完整
-// HTML 模板快照、封面 base64，saves 最多 500 条存档，全绑在同一个 KV 大 JSON 里。
-// 原来每次 loadGameState() 都要 JSON.parse 整包 + 逐个 normalize，而
-// loadGameProjectionEntries 在每次组装短期上下文时都会被调用（聊天、朋友圈后台轮询
-// 都会触发），等于每轮对话都把整个游戏大厅反序列化一遍。这里按原始字符串引用比对缓存。
-let _gameStateMemoRaw: string | null | undefined = undefined;
-let _gameStateMemoResult: GameState | null = null;
+// 性能与内存必须分开看：
+// - 原先这里缓存整个 GameState（installedGames 含每个已安装小游戏的完整 HTML 模板
+//   快照与封面 base64，saves 最多 500 条），等于把整个游戏大厅常驻 JS 堆，后台很容易
+//   被 iOS Jetsam 强杀。
+// - 但 loadGameProjectionEntries 每次组装短期上下文都会被调用（聊天、朋友圈后台轮询
+//   都会触发），又不能每次 JSON.parse 整包。
+// 折衷：不再缓存整包 State（loadGameState 按需解析），只给这条热路径留一份**轻量**
+// 投影缓存——仅 id/时间戳/摘要等小字段，条目数受 MAX_GAME_PROJECTION_EVENTS 约束。
+let _gameEventsMemoRaw: string | null | undefined = undefined;
+let _gameEventsMemoResult: GameProjectionEntry[] | null = null;
 
 export function loadGameState(): GameState {
   const raw = typeof window !== "undefined" ? kvGet(GAME_STATE_KEY) : null;
-  if (!raw) {
-    _gameStateMemoRaw = raw;
-    _gameStateMemoResult = null;
-    return createDefaultGameState();
-  }
-  if (raw === _gameStateMemoRaw && _gameStateMemoResult) return _gameStateMemoResult;
+  if (!raw) return createDefaultGameState();
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const result: GameState = {
@@ -288,8 +286,6 @@ export function loadGameState(): GameState {
         : [],
       updatedAt: cleanText(parsed.updatedAt, 80) || new Date().toISOString(),
     };
-    _gameStateMemoRaw = raw;
-    _gameStateMemoResult = result;
     return result;
   } catch {
     return createDefaultGameState();
@@ -316,8 +312,9 @@ export function saveGameState(state: GameState): GameState {
   };
   const serialized = JSON.stringify(next);
   kvSet(GAME_STATE_KEY, serialized);
-  _gameStateMemoRaw = serialized;
-  _gameStateMemoResult = next;
+  // 写入后让投影缓存失效（下次读时按新串重建轻量投影）
+  _gameEventsMemoRaw = serialized;
+  _gameEventsMemoResult = next.gameEvents;
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(GAME_UPDATED_EVENT));
   return next;
 }
@@ -523,13 +520,39 @@ export function deleteGameProjectionEvent(eventId: string): { ok: boolean; state
   };
 }
 
+/**
+ * 只取 projection events 的轻量读法：命中缓存时直接返回（缓存里只有 id/时间戳/
+ * 摘要等小字段，不含 HTML 模板与 base64），未命中才解析整包并只保留 events。
+ * 供 loadGameProjectionEntries 这类每轮对话都会被批量调用的热路径使用。
+ */
+function loadGameProjectionEvents(): GameProjectionEntry[] {
+  const raw = typeof window !== "undefined" ? kvGet(GAME_STATE_KEY) : null;
+  if (!raw) {
+    _gameEventsMemoRaw = raw;
+    _gameEventsMemoResult = null;
+    return [];
+  }
+  if (raw === _gameEventsMemoRaw && _gameEventsMemoResult) return _gameEventsMemoResult;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const events = Array.isArray(parsed.gameEvents)
+      ? parsed.gameEvents.map(normalizeGameProjectionEntry).filter(Boolean).slice(-MAX_GAME_PROJECTION_EVENTS) as GameProjectionEntry[]
+      : [];
+    _gameEventsMemoRaw = raw;
+    _gameEventsMemoResult = events;
+    return events;
+  } catch {
+    return [];
+  }
+}
+
 export function loadGameProjectionEntries(
   characterId: string,
   options?: { afterTimestamp?: string },
 ): GameProjectionEntry[] {
   const id = cleanText(characterId, 160);
   if (!id) return [];
-  const entries = loadGameState().gameEvents
+  const entries = loadGameProjectionEvents()
     .filter(entry => entry.characterId === id)
     .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   if (!options?.afterTimestamp) return entries;
@@ -600,6 +623,6 @@ export function saveGameDrafts(drafts: GameHallDraft[]): GameHallDraft[] {
 export function deleteAllGameData(): void {
   kvRemove(GAME_STATE_KEY);
   kvRemove(GAME_DRAFTS_KEY);
-  _gameStateMemoRaw = undefined;
-  _gameStateMemoResult = null;
+  _gameEventsMemoRaw = undefined;
+  _gameEventsMemoResult = null;
 }

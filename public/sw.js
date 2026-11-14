@@ -1,4 +1,4 @@
-const CACHE_VERSION = "ai-phone-pwa-v15";
+const CACHE_VERSION = "ai-phone-pwa-v16";
 const NAVIGATE_FETCH_TIMEOUT_MS = 1800;
 const ASSET_FETCH_TIMEOUT_MS = 8000;
 

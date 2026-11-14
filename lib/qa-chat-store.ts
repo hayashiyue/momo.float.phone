@@ -730,7 +730,7 @@ export async function sendQaMessage(
     // 90k 级的读取结果整条进渲染与持久层会把低端机拖垮
     const clipForUi = (text: string | undefined): string | undefined => {
         if (text == null) return undefined;
-        return text.length > 4000 ? `${text.slice(0, 4000)}\n…（已截断，完整内容共 ${text.length.toLocaleString()} 字符）` : text;
+        return text.length > 1500 ? `${text.slice(0, 1500)}\n…（已截断，完整内容共 ${text.length.toLocaleString()} 字符）` : text;
     };
 
     try {

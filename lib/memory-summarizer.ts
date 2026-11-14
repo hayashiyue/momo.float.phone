@@ -16,7 +16,7 @@ import {
     incrementCoreMemoryCounter,
 } from "./memory-storage";
 import { resolveAuxiliaryApiConfig } from "./settings-storage";
-import { loadNativeTimeline, formatTimelineForSummarization, filterTimelineByAllowedSources } from "./short-term-assembler";
+import { loadNativeTimelineAsync, formatTimelineForSummarization, filterTimelineByAllowedSources } from "./short-term-assembler";
 import { generateEmbedding, resolveEmbeddingModel } from "./memory-embedding";
 import { simpleLLMCall } from "./api-helpers";
 import { maybeRunCoreMemoryPipeline } from "./core-memory-builder";
@@ -82,8 +82,13 @@ export async function runSummarizationPipeline(
     // 记忆来源开关同样作用于长期总结：被关掉的来源不进总结素材。
     // 进度水位线取「过滤后」最后一条的时间，因此关掉的来源不会把水位线推过头，
     // 但已被水位线越过的内容重新打开后也不会回补——这一点在设置里已注明。
+    // 必须走异步版：同步版 loadNativeTimeline 会在主线程一口气把全库历史扫完
+    // 并逐条正则清洗，回复结束 6 秒后触发的总结会直接把 UI 卡死数秒。
+    // 异步版每 400 条 yield 一次，让出主线程，配合 maxMessagesPerSession 收窄扫描窗口。
     const allEntries = filterTimelineByAllowedSources(
-        loadNativeTimeline(characterId, afterTimestamp ? { afterTimestamp } : undefined),
+        await loadNativeTimelineAsync(characterId, afterTimestamp
+            ? { afterTimestamp, maxMessagesPerSession: 200 }
+            : { maxMessagesPerSession: 200 }),
         config.shortTermAllowedSources,
     );
 

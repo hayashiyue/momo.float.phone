@@ -2782,6 +2782,37 @@ async function generateChatCompletionCore(
             // 会让两份数百 KB 的请求体同时驻留内存，在 iOS WebKit 上直接触发 Jetsam 崩溃。
             await new Promise(r => setTimeout(r, 15000));
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
+            // 本兜底的唯一用途是「用户离开页面后仍能收到回复」。用户还在前台看屏幕时
+            // 提前克隆 llmMessages 并 buildProviderRequest（内部还要 JSON.stringify 一次）
+            // 会平白多出两份数百 KB 的请求体，在 iOS WebKit 上正是 Jetsam 与 GC 卡顿的来源。
+            // 所以前台不做事，只挂一次性监听，等真正切到后台那一刻再挂单。
+            if (typeof document !== "undefined" && document.visibilityState === "visible") {
+                const wentBackground = await new Promise<boolean>(resolve => {
+                    let settled = false;
+                    let timer: ReturnType<typeof setInterval> | null = null;
+                    const cleanup = () => {
+                        if (timer !== null) { clearInterval(timer); timer = null; }
+                        document.removeEventListener("visibilitychange", onVisibility);
+                    };
+                    const settle = (go: boolean) => {
+                        if (settled) return;
+                        settled = true;
+                        cleanup();
+                        resolve(go);
+                    };
+                    const onVisibility = () => {
+                        if (document.visibilityState === "hidden") settle(true);
+                    };
+                    document.addEventListener("visibilitychange", onVisibility);
+                    // 兜底巡检：本轮生成结束（closed/superseded/abort）时摘掉监听，
+                    // 避免监听器随每条回复累积。只查三个布尔量，不碰任何大对象。
+                    timer = setInterval(() => {
+                        if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) settle(false);
+                    }, 1500);
+                });
+                if (!wentBackground) return;
+            }
+            if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
             if (!(await mod.canArmReplyBailout())) return;
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
             await new Promise<void>(r => setTimeout(r, 0));

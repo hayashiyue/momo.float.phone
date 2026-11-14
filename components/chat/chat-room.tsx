@@ -1860,12 +1860,20 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 .filter(m => m.mediaType === "sticker" && m.mediaData?.label)
                 .map(m => m.mediaData!.label!)
         );
+        // 首帧必须立刻把气泡上屏。此前 setMessages(msgs) 和三个 ref 赋值被塞进
+        // prewarmStickerCache 的 .then() 回调里，而 prewarmStickerCache 要异步读
+        // IndexedDB 的表情包表：首次进入某个角色的聊天室时，IDB 返回前 messages
+        // 一直是空数组，整个聊天室就是一片空白 1~2 秒；第二次进因为表情包缓存已
+        // 命中才「秒进」。表情包预热只是为了让图片提前解码，绝不能拦住文字气泡。
+        // 同步执行后 useLayoutEffect 会在首帧同一次 DOM mutation 内完成贴底。
+        needsInitialScrollRef.current = true;
+        prevMsgCountRef.current = 0;
+        visibleMessagesRef.current = msgs;
+        setMessages(msgs);
         Promise.all(charIds.map(id => prewarmStickerCache(id, usedStickerNames))).catch(() => {}).then(() => {
+            // 表情包已就绪：stickerReady 目前没有消费方（仅声明于 state），
+            // 保留写入以便后续接入，不会影响已上屏的消息。
             setStickerReady(true);
-            needsInitialScrollRef.current = true;
-            prevMsgCountRef.current = 0;
-            visibleMessagesRef.current = msgs;
-            setMessages(msgs);
         });
 
         // If a background generation is still in progress, show loading indicator.
