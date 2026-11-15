@@ -72,10 +72,25 @@ function ensureAudioCreated() {
     // 只靠「切回前台用户触摸」兜底会漏掉长时间留在后台的场景（打断后没人点就永远死了）。
     // 这里挂事件级自愈：只要还想保活且不在通话中，一被打断立即尝试续播。
     const tryResume = () => {
+        // 以持久化开关为准：用户在设置里关掉「后台保活」后，任何事件都不得再拉起音频。
+        if (!loadKeepAlive()) { stopKeepAlive(); return; }
         if (!_keepAliveWanted || _suspendedForCall || !_keepAliveAudio) return;
         if (!_keepAliveAudio.paused) return;
-        _keepAliveAudio.play().catch(() => {});
+        // 立即尝试一次；被其他有声 App 占用时 iOS 会拒绝，800ms 后再补一次。
+        // 补这一下是为了「挂在后台去听歌/看视频/打游戏」的场景：被打断后能自愈，
+        // 不至于因为一次抢占失败就让后台保活彻底死掉、进程随后被系统回收。
+        _keepAliveAudio.play().catch(() => {
+            window.setTimeout(() => {
+                if (!loadKeepAlive() || _suspendedForCall || !_keepAliveAudio) return;
+                if (!_keepAliveAudio.paused) return;
+                _keepAliveAudio.play().catch(() => {});
+            }, 800);
+        });
     };
+    // pause / ended / stalled / suspend 四种中断都自愈：用户挂在后台时被微信提示音、
+    // 音视频 App 抢占音频会话都属被动中断，不自愈就会永久静音、进程被系统挂起。
+    // 用户主动关停的唯一入口是设置里的「后台保活」开关（turnOffKeepAlive），
+    // tryResume 每次都以 loadKeepAlive() 为准，关掉后不可能被重新拉起。
     _keepAliveAudio.addEventListener("pause", tryResume);
     _keepAliveAudio.addEventListener("ended", tryResume);
     _keepAliveAudio.addEventListener("stalled", tryResume);
@@ -84,6 +99,8 @@ function ensureAudioCreated() {
 
 /** 用户触摸时尝试播放（浏览器要求音频必须在用户手势中启动） */
 function onUserGesture() {
+    // 与 tryResume 同一条铁律：以持久化开关为准。
+    if (!loadKeepAlive()) { stopKeepAlive(); return; }
     if (!_keepAliveWanted || _suspendedForCall || !_keepAliveAudio) return;
     // 播放中不做任何事，且不得摘除监听：iOS 会反复打断音频会话，
     // 摘掉监听会导致后面几次打断再也无法通过触摸恢复（保活彻底死掉）。
@@ -145,6 +162,26 @@ function stopKeepAlive() {
         _keepAliveAudio.currentTime = 0;
     }
     disarmGestureRestore();
+}
+
+/**
+ * 彻底释放保活音频：暂停 + 释放 Blob URL + 置空引用。
+ * 与 stopKeepAlive 的区别：那个只是「停」，对象还留着供下次恢复；
+ * 这里是页面真正卸载时用的，必须把 ObjectURL 也 revoke 掉，
+ * 否则静音音频会继续占系统音频会话与后台内存。
+ */
+function disposeKeepAlive() {
+    stopKeepAlive();
+    if (_keepAliveAudio) {
+        const src = _keepAliveAudio.src;
+        try { _keepAliveAudio.pause(); } catch { /* ignore */ }
+        try { _keepAliveAudio.removeAttribute("src"); } catch { /* ignore */ }
+        try { _keepAliveAudio.load(); } catch { /* ignore */ }
+        if (src.startsWith("blob:")) {
+            try { URL.revokeObjectURL(src); } catch { /* ignore */ }
+        }
+        _keepAliveAudio = null;
+    }
 }
 
 /**
@@ -247,9 +284,19 @@ export function useWeixinBridge() {
             if (on) startKeepAlive(); else stopKeepAlive();
         };
         window.addEventListener("weixin-config-changed", onCfg);
+        // 页面被卸载（从多任务里划掉 / 关闭 PWA）时彻底停掉保活并释放音频对象，
+        // 不让静音音频继续占着系统音频会话与 WebKit 后台内存。
+        // pagehide 在 iOS PWA 被划掉时触发；beforeunload 覆盖常规刷新/关闭。
+        // 这两个时机都只做「卸载清理」，不影响后台挂起（挂起时不会触发它们）。
+        const onPageHide = () => disposeKeepAlive();
+        const onBeforeUnload = () => disposeKeepAlive();
+        window.addEventListener("pagehide", onPageHide);
+        window.addEventListener("beforeunload", onBeforeUnload);
         return () => {
             window.removeEventListener("weixin-config-changed", onCfg);
-            stopKeepAlive();
+            window.removeEventListener("pagehide", onPageHide);
+            window.removeEventListener("beforeunload", onBeforeUnload);
+            disposeKeepAlive();
         };
     }, []);
 

@@ -220,7 +220,7 @@ function* assembleNativeTimeline(
         const allGroupMessages = loadChatMessages(gs.id);
         const messages = allGroupMessages.length > maxMsgs ? allGroupMessages.slice(-maxMsgs) : allGroupMessages;
         for (const msg of messages) {
-            if (++processedMessages % 40 === 0) yield;
+            if (++processedMessages % 400 === 0) yield;
             if (msg.isRetracted) continue;
             if (isPromptHiddenChatMessage(msg)) continue;
             if (options?.afterTimestamp && msg.createdAt <= options.afterTimestamp) continue;
@@ -316,7 +316,7 @@ function* assembleNativeTimeline(
         const allDirectMessages = loadChatMessages(session.id);
         const messages = allDirectMessages.length > maxMsgs ? allDirectMessages.slice(-maxMsgs) : allDirectMessages;
         for (const msg of messages) {
-            if (++processedMessages % 40 === 0) yield;
+            if (++processedMessages % 400 === 0) yield;
             if (msg.isRetracted) continue;
             if (isPromptHiddenChatMessage(msg)) continue;
             if (options?.afterTimestamp && msg.createdAt <= options.afterTimestamp) continue;
@@ -439,15 +439,10 @@ function* assembleNativeTimeline(
 
     // ── Moments posts & comments (grouped by post) ──
     // Each post + its comments become ONE timeline entry.
-    yield;
     const allPosts = isSourceAllowed("moments") ? loadMomentPosts() : [];
     const posts = allPosts.length > 30 ? allPosts.slice(0, 30) : allPosts;
-    // 朋友圈每个 post 都要过滤可见评论/点赞并拼线程，单条成本远高于普通消息。
-    // 这里按 post 计数让出，避免 30 条帖子挤在同一个同步切片里。
-    let processedPosts = 0;
     for (const post of posts) {
-        if (++processedPosts % 3 === 0) yield;
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         if (!canCharacterSeeMomentPost(post, characterId)) continue;
         const isCharPost = post.authorId === characterId;
         const isUserPost = post.authorType === "user";
@@ -583,16 +578,13 @@ function* assembleNativeTimeline(
     }
 
     // ── Story projections ──
-    // 每个模块加载前先让出一帧：load*ProjectionEntries 本身是纯同步的，
-    // 十几个模块串在同一个宏任务里跑完，主线程会连续冻结数秒（点暂停无响应）。
-    yield;
     const storyEntries = isSourceAllowed("story") ? loadStoryProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
         userName,
         charName,
     }) : [];
     for (const storyEntry of storyEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: storyEntry.id,
             sourceApp: "story",
@@ -608,7 +600,6 @@ function* assembleNativeTimeline(
     }
 
     // ── Offline chat projections ──
-    yield;
     const offlineEntries = isSourceAllowed("chat") ? loadChatOfflineProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
         excludeSessionId: options?.excludeOfflineSessionId,
@@ -632,7 +623,6 @@ function* assembleNativeTimeline(
     }
 
     // ── Black market theater projections ──
-    yield;
     const theaterEntries = isSourceAllowed("story") ? loadBlackMarketTheaterProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
@@ -652,12 +642,11 @@ function* assembleNativeTimeline(
     }
 
     // ── VN projections ──
-    yield;
     const vnEntries = isSourceAllowed("vn") ? loadVnProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const vnEntry of vnEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: vnEntry.id,
             sourceApp: "vn",
@@ -672,7 +661,6 @@ function* assembleNativeTimeline(
     }
 
     // ── Map adventure projections ──
-    yield;
     const mapEntries = isSourceAllowed("adventure") ? loadMapProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
@@ -710,12 +698,11 @@ function* assembleNativeTimeline(
     }
 
     // ── Game hall projections ──
-    yield;
     const gameEntries = isSourceAllowed("game") ? loadGameProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const gameEntry of gameEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: gameEntry.id,
             sourceApp: "game",
@@ -727,13 +714,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Diary entries ──
-    yield;
     const diaryEntries = isSourceAllowed("diary") ? loadDiaryEntries().filter(entry =>
         entry.characterId === characterId
         && (!options?.afterTimestamp || entry.createdAt > options.afterTimestamp)
     ) : [];
     for (const diaryEntry of diaryEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: diaryEntry.id,
             sourceApp: "diary",
@@ -745,12 +731,11 @@ function* assembleNativeTimeline(
     }
 
     // ── Note wall projections ──
-    yield;
     const noteWallEntries = isSourceAllowed("notewall") ? loadNoteWallProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const noteWallEntry of noteWallEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: noteWallEntry.id,
             sourceApp: "diary",
@@ -767,12 +752,11 @@ function* assembleNativeTimeline(
     }
 
     // ── Xiaohongshu projections ──
-    yield;
     const xiaohongshuEntries = isSourceAllowed("xiaohongshu") ? loadXiaohongshuProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const xiaohongshuEntry of xiaohongshuEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: xiaohongshuEntry.id,
             sourceApp: "xiaohongshu",
@@ -789,12 +773,11 @@ function* assembleNativeTimeline(
     }
 
     // ── Check phone projections ──
-    yield;
     const checkPhoneEntries = isSourceAllowed("checkphone") ? loadCheckPhoneProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const checkPhoneEntry of checkPhoneEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         const rendered = renderCharacterMacro(renderUserNameMacro(checkPhoneEntry.content, userName), charName);
         entries.push({
             id: checkPhoneEntry.id,
@@ -812,12 +795,11 @@ function* assembleNativeTimeline(
     }
 
     // ── Interview magazine projections ──
-    yield;
     const interviewEntries = isSourceAllowed("interview") ? loadInterviewMagazineProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const interviewEntry of interviewEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: interviewEntry.id,
             sourceApp: "interview_magazine",
@@ -834,12 +816,11 @@ function* assembleNativeTimeline(
     }
 
     // ── Co-create projections ──
-    yield;
     const cocreateEntries = isSourceAllowed("cocreate") ? loadCoCreateProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const cocreateEntry of cocreateEntries) {
-        if (++processedMessages % 40 === 0) yield;
+        if (++processedMessages % 400 === 0) yield;
         entries.push({
             id: cocreateEntry.id,
             sourceApp: "cocreate",
@@ -857,12 +838,11 @@ function* assembleNativeTimeline(
     }
 
     // ── Custom app timeline events ──
-    yield;
     const customAppEntries = isSourceAllowed("custom_app") ? loadCustomAppTimelineEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const customEntry of customAppEntries) {
-        if (++processedMessages % 20 === 0) yield;
+        if (++processedMessages % 100 === 0) yield;
         const label = customEntry.appLabel || customEntry.appName || "APP";
         entries.push({
             id: customEntry.id,

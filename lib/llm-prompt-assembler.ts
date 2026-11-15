@@ -420,6 +420,45 @@ function applyWorldInfoRegex(text: string, regexGroups: RegexConfig[], ctx?: Reg
     return applyRegex(text, regexGroups, 5, { isPrompt: true, ...ctx });
 }
 
+/** 这些 marker 的返回值已逐条展开过宏（见 joinWorldBookEntriesWithMacros），调用方不要重复 expand。 */
+const MACRO_ALREADY_EXPANDED_MARKERS = new Set(["worldInfoBefore", "worldInfoAfter"]);
+
+/**
+ * 世界书条目的逐条宏展开 + 世界书正则 + 拼接。
+ *
+ * 关键点：必须在**每条**上单独跑 MacroEngine.expand，而不是 join 之后再跑整体。
+ * 整体展开时，几百条世界书合起来哪怕只有一条含 {{char}}，includes("{{") 短路
+ * 就会对整块几十万字失效，所有不含宏的条目也被迫跟着跑全文正则（还可能因为
+ * 某条含无法识别的 {{xxx}} 而多跑一轮）。逐条展开后不含宏的条目直接原样返回。
+ */
+function joinWorldBookEntriesWithMacros(
+    entries: WorldBookEntry[],
+    regexGroups: RegexConfig[] | undefined,
+    regexCtx?: RegexContext,
+): string | null {
+    if (entries.length === 0) return null;
+    const sorted = [...entries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
+    // 世界书正则（placement=5）与输入正则同属提示词阶段：先一次性筛出候选规则，
+    // 无候选时整批条目连一次正则循环都不用跑（绝大多数用户没配 placement=5 的 promptOnly 规则）。
+    const candidates = regexGroups
+        ? collectPromptRegexCandidates(regexGroups, 5, regexCtx?.activeTags ?? [])
+        : [];
+    const engine = regexCtx?.macroEngine;
+    const out: string[] = [];
+    for (const entry of sorted) {
+        let content = entry.content;
+        // 逐条展开宏：不含 "{{" 的条目由 MacroEngine 内部短路直接返回，零成本
+        if (engine && content.includes("{{")) {
+            content = postProcessTrim(engine.expand(content)).trim();
+        }
+        if (candidates.length > 0) {
+            content = applyPromptRegexCandidates(content, candidates, regexCtx ?? {});
+        }
+        if (content) out.push(content);
+    }
+    return out.length > 0 ? out.join("\n\n") : null;
+}
+
 function getMarkerContent(
     identifier: string,
     character: Character,
@@ -441,26 +480,16 @@ function getMarkerContent(
             return character.personality?.trim() || null;
         case "personaDescription":
             return userPersonaText;
-        case "worldInfoBefore": {
-            if (wbBeforeEntries.length === 0) return null;
-            const sorted = [...wbBeforeEntries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
-            // 世界书正则（placement=5）与输入正则同属提示词阶段：先一次性筛出候选规则，
-            // 无候选时整批条目连一次正则循环都不用跑（绝大多数用户没配 placement=5 的 promptOnly 规则）。
-            const candidates = regexGroups
-                ? collectPromptRegexCandidates(regexGroups, 5, regexCtx?.activeTags ?? [])
-                : [];
-            if (candidates.length === 0) return sorted.map(e => e.content).join("\n\n");
-            return sorted.map(e => applyPromptRegexCandidates(e.content, candidates, regexCtx ?? {})).join("\n\n");
-        }
-        case "worldInfoAfter": {
-            if (wbAfterEntries.length === 0) return null;
-            const sorted = [...wbAfterEntries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
-            const candidates = regexGroups
-                ? collectPromptRegexCandidates(regexGroups, 5, regexCtx?.activeTags ?? [])
-                : [];
-            if (candidates.length === 0) return sorted.map(e => e.content).join("\n\n");
-            return sorted.map(e => applyPromptRegexCandidates(e.content, candidates, regexCtx ?? {})).join("\n\n");
-        }
+        // worldInfoBefore / worldInfoAfter 逐条处理，**不能先 join 再整体展开**。
+        // 原因：MacroEngine.expand 的快速短路是 text.includes("{{")，一旦把几百条世界书
+        // 先拼成一整块几十万字的文本，只要其中一条含 {{char}}，短路就整体失效——
+        // 那些本来完全不含宏的条目也会被全文正则扫两遍。逐条展开后，
+        // 不含宏的条目 O(1) 直接返回，含单层宏的条目第二轮即 break。
+        // 处理完再 join，调用方（getMarkerContent 的调用处）因此无需再对整块做 expand。
+        case "worldInfoBefore":
+            return joinWorldBookEntriesWithMacros(wbBeforeEntries, regexGroups, regexCtx);
+        case "worldInfoAfter":
+            return joinWorldBookEntriesWithMacros(wbAfterEntries, regexGroups, regexCtx);
         case "calendarSchedule":
             return scheduleSummary?.trim() || null;
         case "memoryCore":
@@ -807,9 +836,13 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                     input.dwellingContext,
                 );
                 if (markerContent) {
-                    // Expand macros in marker content ({{char}}/{{user}} in char descriptions etc.)
-                    markerContent = engine.expand(markerContent);
-                    markerContent = postProcessTrim(markerContent).trim();
+                    // 世界书这两个 marker 在 joinWorldBookEntriesWithMacros 里已逐条展开过宏，
+                    // 再对拼好的整块跑一次 expand 会把几百条世界书当一个大字符串全文扫，
+                    // 正是「世界书多时点生成卡好几秒」的来源。其余 marker 照常展开。
+                    if (!MACRO_ALREADY_EXPANDED_MARKERS.has(p.identifier)) {
+                        markerContent = engine.expand(markerContent);
+                        markerContent = postProcessTrim(markerContent).trim();
+                    }
                     if (markerContent) {
                         const xmlText = wrapXml(toXmlTag(p.identifier), markerContent);
                         if (afterChatHistory) {

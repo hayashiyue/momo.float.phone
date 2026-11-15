@@ -74,4 +74,13 @@ export function loadKeepAlive(): boolean {
 
 export function saveKeepAlive(on: boolean): void {
     try { kvSet(KEEPALIVE_KEY, on ? "1" : "0"); } catch {}
+    // 必须广播：use-weixin-bridge 里的保活状态机只监听 weixin-config-changed。
+    // 早先这里只写 KV 不发事件，导致在小手机里关掉「后台保活」后，
+    // 内存里的 _keepAliveWanted 仍是 true——任何一次触摸或音频中断
+    // 都会把静音音频重新 play() 起来，表现就是「开关关了还在强制打开」。
+    try {
+        if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("weixin-config-changed"));
+        }
+    } catch { /* ignore */ }
 }
