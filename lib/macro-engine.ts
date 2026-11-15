@@ -104,9 +104,16 @@ export class MacroEngine {
 
     /** Main entry: iteratively expand all macros (innermost first). */
     expand(text: string): string {
+        // 绝大多数世界书正文、预设条目与聊天消息里根本没有宏。对它们跑一遍
+        // /\{\{([^{}]*?)\}\}/gs 全文扫描纯属白烧主线程（每轮生成要过几百个 block）。
+        // includes("{{") 是引擎内建的子串查找，比正则快一到两个数量级，且语义完全等价：
+        // 不含 "{{" 的字符串不可能被该正则匹配到任何内容。
+        if (!text || !text.includes("{{")) return text;
         const MAX_ITERATIONS = 50;
         let result = text;
         for (let i = 0; i < MAX_ITERATIONS; i++) {
+            // 每轮替换后可能已无宏：提前退出，省掉一次确认性的全文正则。
+            if (!result.includes("{{")) break;
             const next = this.expandInnermost(result);
             if (next === result) break; // no more macros
             result = next;

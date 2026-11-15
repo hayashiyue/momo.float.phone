@@ -441,6 +441,13 @@ type ChatPromptBuildOptions = {
     activateAllWorldBooks?: boolean;
     toolsAllowed?: boolean;
     forceEnableTools?: boolean;
+    /**
+     * 中止信号：装配阶段（时间线扫描、短期记忆池、识图预处理、记忆检索、
+     * 世界书激活与输入正则）全程受此信号控制。
+     * 历史教训：装配是纯同步长任务，不接信号时用户点「停止」后要等整段跑完才生效，
+     * 体感就是「点暂停没反应，卡完也不停」。
+     */
+    signal?: AbortSignal;
 };
 
 function matchesPromptProfileRef(prompt: { identifier: string; name?: string }, refs: Set<string>): boolean {
@@ -2031,9 +2038,13 @@ export async function buildChatPromptMessages(
             promptTimestampOptions,
             maxMessagesPerSession: resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget),
             allowedSources: memConfig.shortTermAllowedSources,
+            // 扫描是分片异步的，接上信号后用户点「停止」能在分片间立即中断，
+            // 不必等 14 类模块全部扫完。
+            signal: options?.signal,
         });
     // 时间线扫描后让出一帧，避免与后续短期记忆池排序及世界书正则堆在同一个长宏任务里卡死页面
     await new Promise<void>(resolve => setTimeout(resolve, 0));
+    throwIfAborted(options?.signal);
     const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = skipShortTermScan
         ? {
             recentBlocks: [] as ReturnType<typeof prepareShortTermContext>["recentBlocks"],
@@ -2054,6 +2065,7 @@ export async function buildChatPromptMessages(
             promptTimestampOptions,
         });
     await new Promise<void>(resolve => setTimeout(resolve, 0));
+    throwIfAborted(options?.signal);
     const promptHistory = applyVisionImagePromptLimit(
         truncatedHistory.map(msg => ({ ...msg })),
         resolveVisionImagePromptLimit(session),
@@ -2061,6 +2073,8 @@ export async function buildChatPromptMessages(
 
     if (config.enableImageRecognition) {
         for (const msg of promptHistory) {
+            // 识图预处理逐条 await（可能解码/压缩图片），每条之间都给出中断机会
+            throwIfAborted(options?.signal);
             await prepareVisionPromptImageMessage(msg);
         }
     }
@@ -2071,6 +2085,7 @@ export async function buildChatPromptMessages(
         buildMusicLocalMacro(),
         buildMusicCloudMacro(),
     ]);
+    throwIfAborted(options?.signal);
 
     const longTermMemories = memResults ? formatLongTermMemories(memResults) : "";
     const coreMemories = coreResults ? formatCoreMemories(coreResults) : "";
@@ -2101,6 +2116,7 @@ export async function buildChatPromptMessages(
 
     // 进入全量世界书激活 + 输入正则替换前再让出一帧，防止点生成后主线程连续卡顿数秒
     await new Promise<void>(resolve => setTimeout(resolve, 0));
+    throwIfAborted(options?.signal);
     const llmMessages = assemblePromptPayload({
         character,
         history: promptHistory,
@@ -2264,6 +2280,8 @@ export async function generateOfflineChatCompletion(
         {
             appTags: ["chat", "offline"],
             excludeOfflineSessionId: session.id,
+            // 线下生成同样要能在装配阶段被「停止」打断
+            signal: options?.signal,
         },
     );
     const summaryTag = preset?.story_summary_tag?.trim() || "summary";
