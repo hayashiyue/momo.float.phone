@@ -38,6 +38,7 @@ import {
     type ChatCompletionCallbacks,
     type NativeChatToolBundle,
 } from "./chat-engine";
+import { resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
 import type { CustomAppPromptProfile } from "./custom-app-types";
 import { isNeteaseConfigured } from "./music-service";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
@@ -401,9 +402,7 @@ async function buildGroupChatPromptMessages(
 
     const enabledTools = options?.disableTools ? [] : getEnabledTools("group_chat");
     const usesNativeActions = Boolean(nativeToolProtocolForConfig(config) && enabledTools.length > 0);
-    const groupMaxHistoryWindow = memConfig.shortTermTokenBudget > 0
-        ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4)))
-        : 800;
+    const groupMaxHistoryWindow = resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget);
     const windowedGroupHistory = history.length > groupMaxHistoryWindow ? history.slice(-groupMaxHistoryWindow) : history;
     const annotatedHistory = annotateGroupHistory(windowedGroupHistory, participantIds, userName);
     const {

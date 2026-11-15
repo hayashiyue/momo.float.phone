@@ -16,7 +16,7 @@ import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext, resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
 
@@ -59,7 +59,16 @@ async function buildDwellingMessages(
     const userIdentity = resolveUserIdentity(characterId, "dwelling");
     const memConfig = loadMemoryConfig();
     // 传 timeline：否则走同步版 loadNativeTimeline，在主线程同步扫一遍全部短期模块。
-    const timeline = await loadNativeTimelineAsync(characterId, { appId: "dwelling" });
+    // 必须一并传 allowedSources 和 maxMessagesPerSession：漏传会让这里退化成
+    // 「扫 14 类模块的全量历史」，而且条数不受短期预算约束——栖所每次生成文本
+    // 都要在单帧里全量反序列化一遍，物品文本生成时尤其卡死/闪退。
+    const timeline = await loadNativeTimelineAsync(characterId, {
+        appId: "dwelling",
+        maxMessagesPerSession: resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget),
+        allowedSources: memConfig.shortTermAllowedSources,
+    });
+    // 扫描完成后让出一帧，避免把「短期池排序 + 世界书正则 + 提示词拼装」堆进同一个长宏任务。
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
     const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "dwelling", {
         userName: userIdentity?.name ?? "用户",
         history: [],

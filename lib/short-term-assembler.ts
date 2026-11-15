@@ -978,6 +978,24 @@ function truncateTimelineByTokenBudget(
 }
 
 /**
+ * 每个会话最多扫描多少条历史消息（喂给 timeline / 历史窗口）。
+ *
+ * 全项目唯一口径：chat-engine、group-chat-engine、custom-app-host-api、
+ * dwelling-engine 都从这里取，不要再各自抄一份常量。此前四处调用方各自硬编码
+ * `Math.max(400, Math.min(1500, budget / 4))`，把这里的收紧完全绕过——每次发消息
+ * 都要把每个聊天室各扫 400~1500 条再格式化、算 token，而这批结果绝大多数在按
+ * budget 倒序累加时就被丢弃了，表现为发消息后主线程卡 1~2 秒。
+ *
+ * 语义不变：该函数只决定「喂进上下文池的候选量」，最终进池多少仍由
+ * shortTermTokenBudget 决定（见 prepareShortTermContext 里的统一截断）。
+ */
+export function resolveShortTermMaxMessagesPerSession(shortTermTokenBudget: number): number {
+    return shortTermTokenBudget > 0
+        ? Math.max(120, Math.min(400, Math.ceil(shortTermTokenBudget / 8)))
+        : 150;
+}
+
+/**
  * Drop timeline entries whose source app the user has switched off in
  * 记忆来源 settings. Applies to every consumer of the timeline — the
  * short-term context assembler as well as long-term summarization.
@@ -1041,7 +1059,8 @@ export function prepareShortTermContext(
     // 保底 400 的旧逻辑会让每次发消息都把每个聊天室各扫 400 条再格式化、算 token，
     // 而下方按 token 预算倒序累加、满 20 条即 break，绝大多数结果算完就被丢弃。
     // 这里随 budget 伸缩并压到 120~400，扫描量砍掉七成，语义（预算内进池）不变。
-    const maxMessagesPerSession = budget > 0 ? Math.max(120, Math.min(400, Math.ceil(budget / 8))) : 150;
+    // 公式已抽成 resolveShortTermMaxMessagesPerSession，供各引擎共用同一口径。
+    const maxMessagesPerSession = resolveShortTermMaxMessagesPerSession(budget);
     let timeline = options?.timeline
         ? filterTimelineByAllowedSources(options.timeline, memConfig.shortTermAllowedSources)
         : filterTimelineByAllowedSources(

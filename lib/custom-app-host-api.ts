@@ -54,7 +54,7 @@ import { loadMemoryConfig, loadMemoryEntriesByType, saveMemoryEntry } from "./me
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import type { MemoryEntry } from "./memory-types";
-import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext, resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
 import {
   createWorldBook,
   createRegexGroup,
@@ -568,12 +568,20 @@ function normalizeCustomAppGenerateMessages(record: Record<string, unknown>, ses
       ? record.messages
       : null;
   if (!raw) return null;
+  // 先按上限截取候选，再逐条清洗。
+  // 旧实现把 appMessages 全量走一遍 cleanUnboundedText（无长度上限）并逐条做
+  // dataURL 判断，最后才在调用处 slice(-recentLimit) 丢弃——APP 一次塞几百条
+  // 带图历史时，这一趟同步清洗就是几 MB 的字符串分配，直接卡住主线程／闪退。
+  // 调用方最多只会取 recentLimit 条（内部还会再 slice），这里留 4 倍余量足够。
+  const callerLimit = Math.max(1, Math.min(50, Number(record.historyLimit ?? 12) || 12));
+  const candidateLimit = Math.min(raw.length, callerLimit * 4);
+  const candidates = candidateLimit < raw.length ? raw.slice(-candidateLimit) : raw;
   // APP 可在消息上带 image（data:image dataURL）走视觉通道；限量限大小防上下文爆炸。
   // 用户模型不支持/关闭图像识别时，下游 provider-adapter 会自动降级为 [图片] 文本。
   let imageCount = 0;
   const MAX_IMAGES_PER_CALL = 4;
   const MAX_IMAGE_DATAURL_LENGTH = 2_000_000;
-  return raw.map((item, index): ChatMessage | null => {
+  return candidates.map((item, index): ChatMessage | null => {
     const entry = asRecord(item);
     const nativeToolCalls = normalizeCustomAppNativeToolCalls(entry.nativeToolCalls ?? entry.toolCalls);
     const nativeToolResult = normalizeCustomAppNativeToolResult(entry.nativeToolResult ?? entry.toolResult);
@@ -603,7 +611,7 @@ function normalizeCustomAppGenerateMessages(record: Record<string, unknown>, ses
       role: normalizeCustomAppGenerateRole(entry.role, Boolean(nativeToolResult)),
       content,
       status: "sent",
-      createdAt: normalizeCustomAppGenerateTimestamp(entry.createdAt ?? entry.timestamp ?? entry.at, index, raw.length),
+      createdAt: normalizeCustomAppGenerateTimestamp(entry.createdAt ?? entry.timestamp ?? entry.at, index, candidates.length),
       senderName: cleanText(entry.senderName ?? entry.name, 80) || undefined,
       origin: "custom_app",
       mediaType,
@@ -2447,9 +2455,7 @@ export async function readCustomAppShortTermMemory(app: InstalledCustomApp, reco
   // 会把 generator 的每个 yield 原地空转，在单帧内反序列化聊天/朋友圈/日记/剧场等
   // 十几类模块的全部数据，移动端直接内存爆炸闪退。
   const memConfig = loadMemoryConfig();
-  const maxMessagesPerSession = memConfig.shortTermTokenBudget > 0
-    ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4)))
-    : 800;
+  const maxMessagesPerSession = resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget);
   const timeline = await loadNativeTimelineAsync(characterId, {
     appId: `custom_app:${app.id}` as import("./settings-types").ContentAppId,
     maxMessagesPerSession,

@@ -64,7 +64,7 @@ import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
-import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext, resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./tool-storage";
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
@@ -874,6 +874,30 @@ async function readSseStream(
     return { content, rawResponse };
 }
 
+/**
+ * API 日志的消息脱敏：剥掉图片 base64，并把超长文本截断。
+ *
+ * 非流式路径（sendLLMRequest）早就做了 12,000 字符上限并注明「avoid OOM in iOS WebKit」，
+ * 但流式（sendLLMStreamRequest）、原生工具流式（sendLLMToolStreamRequest）、
+ * 原生工具整段（sendLLMToolRequest）三条路径都漏了这一步——而它们恰好是日常聊天
+ * 与自定义 APP 调模型的常用路径。生成几次之后，日志里就常驻着几份完整的巨型系统
+ * 提示词副本，低内存设备上会直接被 Jetsam 杀掉。
+ */
+const LOG_MSG_MAX_CHARS = 12_000;
+
+function sanitizeMessagesForApiLog(
+    messages: { role?: string; content?: unknown }[],
+): Array<Record<string, unknown>> {
+    return messages.map(m => ({
+        ...m,
+        content: typeof m.content === "string"
+            ? (m.content.length > LOG_MSG_MAX_CHARS
+                ? `${m.content.slice(0, 8_000)}\n...[日志已截断 ${m.content.length - 11_000} 字符以防内存溢出]...\n${m.content.slice(-3_000)}`
+                : m.content)
+            : "[vision: 含图片的多模态消息]",
+    }));
+}
+
 export async function sendLLMStreamRequest(
     config: ApiConfig,
     preset: PresetConfig | null,
@@ -941,10 +965,7 @@ export async function sendLLMStreamRequest(
 
         // Store API log entry — mirror sendLLMRequest so streaming calls also show up
         // in the "底层调用大模型日志" panel. reasoning 单独存思维链原文，供「查看原始」直接展示。
-        const sanitizedMessages = request.messagesForLog.map(m => ({
-            ...m,
-            content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
-        }));
+        const sanitizedMessages = sanitizeMessagesForApiLog(request.messagesForLog);
         pushApiLog({
             characterName: meta?.characterName,
             ...apiLogChannelFor(options),
@@ -1123,15 +1144,7 @@ export async function sendLLMRequest(
         }
 
         // Store API log entry (strip base64 image data & cap huge system prompts to avoid OOM in iOS WebKit)
-        const LOG_MSG_MAX_CHARS = 12_000;
-        const sanitizedMessages = request.messagesForLog.map(m => ({
-            ...m,
-            content: typeof m.content === "string"
-                ? (m.content.length > LOG_MSG_MAX_CHARS
-                    ? `${m.content.slice(0, 8_000)}\n...[日志已截断 ${m.content.length - 11_000} 字符以防内存溢出]...\n${m.content.slice(-3_000)}`
-                    : m.content)
-                : "[vision: 含图片的多模态消息]",
-        }));
+        const sanitizedMessages = sanitizeMessagesForApiLog(request.messagesForLog);
         pushApiLog({
             characterName: meta?.characterName,
             ...apiLogChannelFor(options),
@@ -1347,10 +1360,7 @@ export async function sendLLMToolStreamRequest(
         }
         content = await applyChatPluginLlmResponse(content, pluginPurpose, options?.debugSessionId);
 
-        const sanitizedMessages = request.messagesForLog.map(m => ({
-            ...m,
-            content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
-        }));
+        const sanitizedMessages = sanitizeMessagesForApiLog(request.messagesForLog);
         const { calls: toolCalls, truncatedNames } = finalizeStreamToolCalls(toolDrafts);
         const logEntryRaw = JSON.stringify({ content, reasoning, toolCalls, raw: rawResponse });
         pushApiLog({
@@ -1444,10 +1454,7 @@ export async function sendLLMToolRequest(
             throw new ChatEngineError(emptyDetails.message);
         }
 
-        const sanitizedMessages = request.messagesForLog.map(m => ({
-            ...m,
-            content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
-        }));
+        const sanitizedMessages = sanitizeMessagesForApiLog(request.messagesForLog);
         const rawResponse = JSON.stringify({
             content: parsed.content,
             reasoning: parsed.reasoning,
@@ -2007,28 +2014,45 @@ export async function buildChatPromptMessages(
     const toolsEnabled = enabledTools.length > 0
         && (options?.forceEnableTools === true || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
-    const timeline = await loadNativeTimelineAsync(character.id, {
-        appId: resolvedAppId as import("./settings-types").ContentAppId,
-        userName: userIdentity?.name,
-        excludeOfflineSessionId: options?.excludeOfflineSessionId,
-        excludeChatSessionId: isOfflineMode ? undefined : session.id,
-        promptTimestampOptions,
-        maxMessagesPerSession: memConfig.shortTermTokenBudget > 0 ? Math.max(400, Math.min(1500, Math.ceil(memConfig.shortTermTokenBudget / 4))) : 800,
-        allowedSources: memConfig.shortTermAllowedSources,
-    });
+    // 自定义 APP 明确声明「不要聊天历史」时，无需扫描 14 类模块的时间线、也无需组装
+    // 短期记忆池：这些结果随后会被 assemblePromptPayload 整段丢弃（historyInjectionEnabled
+    // 为 false），却要先把该角色在聊天/朋友圈/剧情/日记/剧场/小红书/访谈/共创等模块里的
+    // 全部历史反序列化一遍。自定义 APP 本身还挂着 iframe 与整包资源，这段白做的全量扫描
+    // 就是「App 调模型时闪退」的直接推手。
+    const skipShortTermScan = promptProfile?.history === "none"
+        || Boolean(promptProfile?.exclude?.includes("shortTermMemory"));
+    const timeline = skipShortTermScan
+        ? []
+        : await loadNativeTimelineAsync(character.id, {
+            appId: resolvedAppId as import("./settings-types").ContentAppId,
+            userName: userIdentity?.name,
+            excludeOfflineSessionId: options?.excludeOfflineSessionId,
+            excludeChatSessionId: isOfflineMode ? undefined : session.id,
+            promptTimestampOptions,
+            maxMessagesPerSession: resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget),
+            allowedSources: memConfig.shortTermAllowedSources,
+        });
     // 时间线扫描后让出一帧，避免与后续短期记忆池排序及世界书正则堆在同一个长宏任务里卡死页面
     await new Promise<void>(resolve => setTimeout(resolve, 0));
-    const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
-        timeline,
-        history: historyForPrompt,
-        includeDirectChatEntries: isOfflineMode,
-        includeNativeToolHistory: usesNativeActions,
-        excludeOfflineSessionId: options?.excludeOfflineSessionId,
-        chatAccountId: session.chatAccountId || null,
-        excludeChatSessionId: isOfflineMode ? undefined : session.id,
-        userName: userIdentity?.name,
-        promptTimestampOptions,
-    });
+    const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = skipShortTermScan
+        ? {
+            recentBlocks: [] as ReturnType<typeof prepareShortTermContext>["recentBlocks"],
+            truncatedHistory: historyForPrompt,
+            // 世界书关键词匹配仍需要一段上下文：用当前历史尾部，成本可忽略
+            wbActivationContext: historyForPrompt.slice(-10).map(m => m.content).join("\n"),
+            unifiedRecentItems: [] as ReturnType<typeof prepareShortTermContext>["unifiedRecentItems"],
+        }
+        : prepareShortTermContext(character.id, resolvedAppId, {
+            timeline,
+            history: historyForPrompt,
+            includeDirectChatEntries: isOfflineMode,
+            includeNativeToolHistory: usesNativeActions,
+            excludeOfflineSessionId: options?.excludeOfflineSessionId,
+            chatAccountId: session.chatAccountId || null,
+            excludeChatSessionId: isOfflineMode ? undefined : session.id,
+            userName: userIdentity?.name,
+            promptTimestampOptions,
+        });
     await new Promise<void>(resolve => setTimeout(resolve, 0));
     const promptHistory = applyVisionImagePromptLimit(
         truncatedHistory.map(msg => ({ ...msg })),

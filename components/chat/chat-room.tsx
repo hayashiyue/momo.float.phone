@@ -323,7 +323,7 @@ const GENERATING_LOCK_TTL_MS = 5 * 60 * 1000;
 // 120ms（约 8fps）在观感上仍是连续打字，却把正则开销再降一档。
 // 流式期间每次 setStreamPreview 都会让整棵聊天室重渲染，低端机上 80ms 仍会
 // 把主线程占满——点「停止生成」的 click 宏任务排不进事件循环，看起来就是按钮点不动。
-const STREAM_PREVIEW_MIN_INTERVAL_MS = 120;
+const STREAM_PREVIEW_MIN_INTERVAL_MS = 180;
 const OFFLINE_INITIAL_LOAD = 10;
 const OFFLINE_LOAD_MORE_COUNT = 10;
 
@@ -706,6 +706,10 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
 }, ref) {
     const [inputText, setInputText] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+    // 「停止」在 pointerdown 已经处理过时，吞掉随后那一次残留的 click。
+    // 发送与停止共用同一个按钮：pointerdown 里一旦把 isGenerating 置回 false，
+    // 抬手时 click 派发的 handleSubmit 就会走进「发送」分支，把输入框草稿误发出去。
+    const stopHandledRef = useRef(false);
     // 表情包搜索联想：ESC/失焦置 true 隐藏，输入变化重新开启
     const [suggestClosed, setSuggestClosed] = useState(false);
     // 围观群/被禁言：输入与富媒体入口全部锁定，只留线下切换和生成按钮
@@ -742,6 +746,12 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     }), [appendText]);
 
     const handleSubmit = () => {
+        // pointerdown 已经执行过停止：这次 click 是同一根手指抬起的残留，直接吞掉，
+        // 绝不能落到下面的发送分支（会把输入框里的草稿误发出去）。
+        if (stopHandledRef.current) {
+            stopHandledRef.current = false;
+            return;
+        }
         if (inputLocked) return;
         if (isGenerating) {
             onStopGeneration();
@@ -883,6 +893,19 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                 </button>
                 <button
                     onClick={handleSubmit}
+                    // 生成中让「停止」在手指触屏的第一帧就生效：流式期间列表持续重绘、
+                    // 滚动跟随也在动，移动端 click 需要等抬手且期间不能有重排抖动，
+                    // 极易被合成器吞掉——用户体感就是「点了暂停没反应」。
+                    onPointerDown={e => {
+                        if (!isGenerating) {
+                            // 普通发送按下：确保上次残留的拦截标记不会误吞这一次点击
+                            stopHandledRef.current = false;
+                            return;
+                        }
+                        stopHandledRef.current = true;
+                        e.preventDefault();
+                        onStopGeneration();
+                    }}
                     disabled={!isGenerating && (inputLocked || !inputText.trim())}
                     style={inputLocked && !isGenerating ? { opacity: 0.35 } : undefined}
                     className="ui-bare-btn text-[var(--c-text)]"
@@ -2794,6 +2817,14 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
     };
 
     const clearStuckGeneration = () => {
+        // 幂等守卫：pointerdown 秒停之后，抬手那一刻的 click 可能再进来一次。
+        // 此时本轮 run 已被取消、也没有任何在跑的生成，重复执行会重复弹「已停止」提示
+        // 并再排一次全量重读消息。没有任何活动时直接返回。
+        if (!isGeneratingRef.current
+            && !activeGenerationRuns.has(session.id)
+            && !isBackgroundReplyGenerating(session.id)) {
+            return;
+        }
         // 先掐掉流式预览：不取消挂起的 rAF、不清 streamPreview，停止后那半截
         // 预览气泡还会留在屏幕上，看起来就像「点了停止完全没反应」。
         if (streamParseFrameRef.current) {
@@ -3537,11 +3568,16 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
                             if (!isChatRoomElementVisible(wrapperRef.current)) return;
-                            // 预览更新合并到 rAF 下一帧：每帧最多一次全文净化+setState，避免高频增量卡顿
+                            // 与 triggerAIResponse 的单聊分支保持一致：rAF 合并 + 最小间隔双重限频。
+                            // 这里此前只做了 rAF 合并、漏了 120ms 门槛，等于每个动画帧都对全部累积
+                            // 文本重跑一遍 cleanStreamText（十余条正则）并整棵树重渲染——主线程被占满，
+                            // 「停止生成」的点击排不进事件循环，表现就是按钮点不动。
                             if (streamParseFrameRef.current) return;
+                            if (Date.now() - streamPreviewRenderedAtRef.current < STREAM_PREVIEW_MIN_INTERVAL_MS) return;
                             streamParseFrameRef.current = window.requestAnimationFrame(() => {
                                 streamParseFrameRef.current = 0;
                                 if (!isCurrentGeneration() || !isChatRoomElementVisible(wrapperRef.current)) return;
+                                streamPreviewRenderedAtRef.current = Date.now();
                                 setStreamPreview({ texts: splitStreamPreviewSegments(cleanStreamText(stripForcedStoryPreview(streamAccumRef.current), { stripXmlTags: streamPreviewTagConfig.online, stripLiterals: streamPreviewTagConfig.stripTexts })) });
                             });
                         },
