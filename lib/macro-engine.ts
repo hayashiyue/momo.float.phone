@@ -114,18 +114,40 @@ export class MacroEngine {
         for (let i = 0; i < MAX_ITERATIONS; i++) {
             // 每轮替换后可能已无宏：提前退出，省掉一次确认性的全文正则。
             if (!result.includes("{{")) break;
-            const next = this.expandInnermost(result);
-            if (next === result) break; // no more macros
-            result = next;
+            const pass = this.expandInnermostTracked(result);
+            // 一轮里没有任何宏被真正替换 → 剩下的都是无法解析的宏，
+            // 再跑 N 轮结果也不会变。直接结束，省掉 MAX_ITERATIONS-1 轮
+            // 全文正则 + 全文比对（世界书正文动辄数万字，这是主要浪费之一）。
+            if (!pass.changed) break;
+            result = pass.text;
+            // 这里刻意不再额外判断「是否嵌套」：
+            // 真正的二层嵌套（如 {{getvar::{{char}}}}）在第 1 轮内层展开后，
+            // 外层会合拢成一层 {{getvar::名字}}，此时 result 仍含 "{{"，
+            // 下一轮循环开头的 includes("{{") 检查会自然放行并继续展开；
+            // 而替换结果里不含 "{{" 时，下一轮开头即 break。
+            // 多说一句：曾经尝试在这里用「替换后是否仍有两层花括号」来提前退出，
+            // 但嵌套结构恰恰是在内层替换后才降到一层，那样判断会把它误杀。
         }
         return result;
     }
 
     /** Single pass: find and replace all innermost {{...}} (no nested braces inside). */
     private expandInnermost(text: string): string {
-        return text.replace(/\{\{([^{}]*?)\}\}/gs, (_match, body: string) => {
-            return this.resolve(body);
+        return this.expandInnermostTracked(text).text;
+    }
+
+    /**
+     * 与 expandInnermost 相同，但额外报告本轮是否真的替换掉了至少一个宏。
+     * 没有任何替换时，剩下的都是无法解析的宏，再迭代也不会变。
+     */
+    private expandInnermostTracked(text: string): { text: string; changed: boolean } {
+        let changed = false;
+        const next = text.replace(/\{\{([^{}]*?)\}\}/gs, (match: string, body: string) => {
+            const resolved = this.resolve(body);
+            if (resolved !== match) changed = true;
+            return resolved;
         });
+        return { text: next, changed };
     }
 
     /** Resolve a single macro body (content between {{ and }}). */

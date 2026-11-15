@@ -98,6 +98,11 @@ export type QaChatSnapshot = {
 // ── 上下文预算与压缩 ──
 // 预算按字符估算（中文 ≈1 字符/角标 token 量级）。可用 localStorage
 // 键 ai_phone_qa_context_budget_chars 覆盖（调参/测试用）。
+// 单个会话的上下文预算（按字符估算）。可用 localStorage 键
+// ai_phone_qa_context_budget_chars 覆盖（调参/测试用）。
+// 保持 100 万字符：工坊的主要用途就是长时间写代码、读源码，压缩太早会
+// 频繁打断工作流。卡顿的成因不在这里（同一时间也会时卡时不卡），
+// 不能靠牺牲可用上下文来换性能。
 const DEFAULT_CONTEXT_BUDGET_CHARS = 1_000_000;
 
 function getContextBudget(): number {
@@ -619,12 +624,6 @@ export async function sendQaMessage(
         images: images?.length ? images : undefined,
         files: files?.length ? files : undefined,
     };
-    // 当前内容加上新消息将触顶时，先压缩再开新轮。
-    const nextUsage = contextUsageOf(session) + entryChars(nextEntry) / getContextBudget();
-    if (nextUsage >= 1) {
-        await compactSessionContext(sessionId);
-    }
-
     const userMsg: QaMsg = {
         id: makeId(),
         role: "user",
@@ -635,18 +634,64 @@ export async function sendQaMessage(
     };
     const assistantMsg: QaMsg = { id: makeId(), role: "assistant", content: "", ts: Date.now() };
 
-    updateSession(sessionId, (s) => ({
-        ...s,
-        title: s.messages.length === 0 ? autoTitle(trimmed || "（图片/附件）") : s.title,
-        updatedAt: Date.now(),
-        messages: [...s.messages, ...(options?.silentUser ? [] : [userMsg]), assistantMsg].slice(-MAX_MESSAGES_PER_SESSION),
-        context: [...sessionContext(s), { ...nextEntry, turn: assistantMsg.id }],
-    }));
+    // 先让用户气泡上屏，再做触顶压缩。
+    // 原实现把压缩 await 放在上屏之前：一旦触顶，点发送后界面毫无变化，
+    // 要等一次完整的压缩往返（输入可达数十万字符）才看到自己的消息，
+    // 体感就是「发不出去」。这里把顺序倒过来，但压缩的输入范围保持不变——
+    // 此步只写入 messages，不把 nextEntry 塞进 context。
+    updateSession(
+        sessionId,
+        (s) => ({
+            ...s,
+            title: s.messages.length === 0 ? autoTitle(trimmed || "（图片/附件）") : s.title,
+            updatedAt: Date.now(),
+            messages: [...s.messages, ...(options?.silentUser ? [] : [userMsg]), assistantMsg].slice(-MAX_MESSAGES_PER_SESSION),
+        }),
+        // 不在这里落盘：updateSession 默认会排一个 120ms 后的全库写入
+        // （把整个 sessions 结构化克隆进 IndexedDB），而紧接着的 nextEntry 追加
+        // 与请求体 JSON.stringify 也在同一时间窗口执行。三者撞在一起时，
+        // 主线程被连续占用、内存峰值叠加，表现为「点发送卡几秒」甚至闪退。
+        // 本轮结束时的 paintAssistant({ force: true }) 会正常落盘，数据不会丢。
+        { persist: false },
+    );
 
+    // 进入生成态要早于此处的 await：中间这一帧若用户连点发送，
+    // 函数开头的 isGenerating 守卫才不会漏放第二轮请求进来。
     isGenerating = true;
     const controller = new AbortController();
     abortController = controller;
     emit();
+
+    // 让出一帧，确保用户气泡与「生成中」状态先绘制出来。
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    try {
+        // 触顶则压缩旧上下文。此时 context 里不含本轮 nextEntry，
+        // 压缩产出的摘要不会把用户刚发的这句也当成"之前对话"吞掉。
+        const currentSession = sessions.find((s) => s.id === sessionId) ?? null;
+        if (currentSession && contextUsageOf(currentSession) + entryChars(nextEntry) / getContextBudget() >= 1) {
+            await compactSessionContext(sessionId);
+        }
+        if (controller.signal.aborted) throw new DOMException("aborted", "AbortError");
+
+        // 压缩完成后再把本轮条目接在摘要（或原上下文）之后
+        updateSession(
+            sessionId,
+            (s) => ({ ...s, context: [...sessionContext(s), { ...nextEntry, turn: assistantMsg.id }] }),
+            { persist: false },
+        );
+    } catch {
+        // 压缩或中断失败：移除尚未开始的空占位气泡，复位生成态，
+        // 用户已上屏的消息保留（与中断续接语义一致）。
+        updateSession(sessionId, (s) => ({
+            ...s,
+            messages: s.messages.filter((m) => m.id !== assistantMsg.id),
+        }));
+        isGenerating = false;
+        abortController = null;
+        emit();
+        return;
+    }
 
     let streamedContent = "";
     let streamedReasoning = "";

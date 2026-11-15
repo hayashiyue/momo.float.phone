@@ -220,7 +220,7 @@ function* assembleNativeTimeline(
         const allGroupMessages = loadChatMessages(gs.id);
         const messages = allGroupMessages.length > maxMsgs ? allGroupMessages.slice(-maxMsgs) : allGroupMessages;
         for (const msg of messages) {
-            if (++processedMessages % 400 === 0) yield;
+            if (++processedMessages % 40 === 0) yield;
             if (msg.isRetracted) continue;
             if (isPromptHiddenChatMessage(msg)) continue;
             if (options?.afterTimestamp && msg.createdAt <= options.afterTimestamp) continue;
@@ -316,7 +316,7 @@ function* assembleNativeTimeline(
         const allDirectMessages = loadChatMessages(session.id);
         const messages = allDirectMessages.length > maxMsgs ? allDirectMessages.slice(-maxMsgs) : allDirectMessages;
         for (const msg of messages) {
-            if (++processedMessages % 400 === 0) yield;
+            if (++processedMessages % 40 === 0) yield;
             if (msg.isRetracted) continue;
             if (isPromptHiddenChatMessage(msg)) continue;
             if (options?.afterTimestamp && msg.createdAt <= options.afterTimestamp) continue;
@@ -439,10 +439,15 @@ function* assembleNativeTimeline(
 
     // ── Moments posts & comments (grouped by post) ──
     // Each post + its comments become ONE timeline entry.
+    yield;
     const allPosts = isSourceAllowed("moments") ? loadMomentPosts() : [];
     const posts = allPosts.length > 30 ? allPosts.slice(0, 30) : allPosts;
+    // 朋友圈每个 post 都要过滤可见评论/点赞并拼线程，单条成本远高于普通消息。
+    // 这里按 post 计数让出，避免 30 条帖子挤在同一个同步切片里。
+    let processedPosts = 0;
     for (const post of posts) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedPosts % 3 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         if (!canCharacterSeeMomentPost(post, characterId)) continue;
         const isCharPost = post.authorId === characterId;
         const isUserPost = post.authorType === "user";
@@ -578,13 +583,16 @@ function* assembleNativeTimeline(
     }
 
     // ── Story projections ──
+    // 每个模块加载前先让出一帧：load*ProjectionEntries 本身是纯同步的，
+    // 十几个模块串在同一个宏任务里跑完，主线程会连续冻结数秒（点暂停无响应）。
+    yield;
     const storyEntries = isSourceAllowed("story") ? loadStoryProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
         userName,
         charName,
     }) : [];
     for (const storyEntry of storyEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: storyEntry.id,
             sourceApp: "story",
@@ -600,6 +608,7 @@ function* assembleNativeTimeline(
     }
 
     // ── Offline chat projections ──
+    yield;
     const offlineEntries = isSourceAllowed("chat") ? loadChatOfflineProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
         excludeSessionId: options?.excludeOfflineSessionId,
@@ -623,6 +632,7 @@ function* assembleNativeTimeline(
     }
 
     // ── Black market theater projections ──
+    yield;
     const theaterEntries = isSourceAllowed("story") ? loadBlackMarketTheaterProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
@@ -642,11 +652,12 @@ function* assembleNativeTimeline(
     }
 
     // ── VN projections ──
+    yield;
     const vnEntries = isSourceAllowed("vn") ? loadVnProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const vnEntry of vnEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: vnEntry.id,
             sourceApp: "vn",
@@ -661,6 +672,7 @@ function* assembleNativeTimeline(
     }
 
     // ── Map adventure projections ──
+    yield;
     const mapEntries = isSourceAllowed("adventure") ? loadMapProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
@@ -698,11 +710,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Game hall projections ──
+    yield;
     const gameEntries = isSourceAllowed("game") ? loadGameProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const gameEntry of gameEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: gameEntry.id,
             sourceApp: "game",
@@ -714,12 +727,13 @@ function* assembleNativeTimeline(
     }
 
     // ── Diary entries ──
+    yield;
     const diaryEntries = isSourceAllowed("diary") ? loadDiaryEntries().filter(entry =>
         entry.characterId === characterId
         && (!options?.afterTimestamp || entry.createdAt > options.afterTimestamp)
     ) : [];
     for (const diaryEntry of diaryEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: diaryEntry.id,
             sourceApp: "diary",
@@ -731,11 +745,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Note wall projections ──
+    yield;
     const noteWallEntries = isSourceAllowed("notewall") ? loadNoteWallProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const noteWallEntry of noteWallEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: noteWallEntry.id,
             sourceApp: "diary",
@@ -752,11 +767,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Xiaohongshu projections ──
+    yield;
     const xiaohongshuEntries = isSourceAllowed("xiaohongshu") ? loadXiaohongshuProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const xiaohongshuEntry of xiaohongshuEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: xiaohongshuEntry.id,
             sourceApp: "xiaohongshu",
@@ -773,11 +789,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Check phone projections ──
+    yield;
     const checkPhoneEntries = isSourceAllowed("checkphone") ? loadCheckPhoneProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const checkPhoneEntry of checkPhoneEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         const rendered = renderCharacterMacro(renderUserNameMacro(checkPhoneEntry.content, userName), charName);
         entries.push({
             id: checkPhoneEntry.id,
@@ -795,11 +812,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Interview magazine projections ──
+    yield;
     const interviewEntries = isSourceAllowed("interview") ? loadInterviewMagazineProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const interviewEntry of interviewEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: interviewEntry.id,
             sourceApp: "interview_magazine",
@@ -816,11 +834,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Co-create projections ──
+    yield;
     const cocreateEntries = isSourceAllowed("cocreate") ? loadCoCreateProjectionEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const cocreateEntry of cocreateEntries) {
-        if (++processedMessages % 400 === 0) yield;
+        if (++processedMessages % 40 === 0) yield;
         entries.push({
             id: cocreateEntry.id,
             sourceApp: "cocreate",
@@ -838,11 +857,12 @@ function* assembleNativeTimeline(
     }
 
     // ── Custom app timeline events ──
+    yield;
     const customAppEntries = isSourceAllowed("custom_app") ? loadCustomAppTimelineEntries(characterId, {
         afterTimestamp: options?.afterTimestamp,
     }) : [];
     for (const customEntry of customAppEntries) {
-        if (++processedMessages % 100 === 0) yield;
+        if (++processedMessages % 20 === 0) yield;
         const label = customEntry.appLabel || customEntry.appName || "APP";
         entries.push({
             id: customEntry.id,
@@ -1094,115 +1114,131 @@ export function prepareShortTermContext(
     const skipDirectChatEntries = appId === "chat" && !options?.includeDirectChatEntries;
 
     // ── Collect non-history entries per block ──
+    // 原来这里对同一个 timeline 连续跑了约 20 次独立的 filter，等于把数组遍历 20 遍
+    // （成本 O(20N)，与数据量无关地浪费 20 倍工作量）。下面改为单趟分桶：
+    // 每个元素只判定一次，落进对应的桶，语义与原 20 个 filter 的条件逐条对齐。
     const raw: { tag: string; order: number; entries: NativeTimelineEntry[] }[] = [];
 
-    // All moments-related entries now participate in the unified recent timeline.
-    const momentsEntries = timeline.filter(e => e.sourceApp === "moments");
-    if (momentsEntries.length > 0) {
-        raw.push({ tag: "recent_moments", order: FEATURE_ORDER.moments, entries: momentsEntries });
-    }
+    const bucket = {
+        moments: [] as NativeTimelineEntry[],
+        story: [] as NativeTimelineEntry[],
+        theater: [] as NativeTimelineEntry[],
+        vn: [] as NativeTimelineEntry[],
+        map: [] as NativeTimelineEntry[],
+        game: [] as NativeTimelineEntry[],
+        diary: [] as NativeTimelineEntry[],
+        noteWall: [] as NativeTimelineEntry[],
+        xiaohongshu: [] as NativeTimelineEntry[],
+        checkPhone: [] as NativeTimelineEntry[],
+        interview: [] as NativeTimelineEntry[],
+        cocreate: [] as NativeTimelineEntry[],
+        customApp: [] as NativeTimelineEntry[],
+        groupChat: [] as NativeTimelineEntry[],
+        directChat: [] as NativeTimelineEntry[],
+        otherDirectChat: [] as NativeTimelineEntry[],
+        offlineGroupChat: [] as NativeTimelineEntry[],
+        offlineDirectChat: [] as NativeTimelineEntry[],
+    };
 
-    if (appId !== "story" || timeline.some(entry => entry.sourceApp === "story" && entry.memorySupplement)) {
-        const storyEntries = timeline.filter(e =>
-            e.sourceApp === "story"
-            && (appId !== "story" || e.memorySupplement)
-            && e.sourceDetail !== "black_market_theater"
-            && !isChatOfflineEntry(e)
-        );
-        if (storyEntries.length > 0) {
-            raw.push({ tag: "recent_events", order: FEATURE_ORDER.story, entries: storyEntries });
+    for (const entry of timeline) {
+        const source = entry.sourceApp;
+        if (source === "moments") { bucket.moments.push(entry); continue; }
+        if (source === "story") {
+            if (entry.sourceDetail === "black_market_theater") bucket.theater.push(entry);
+            else if ((appId !== "story" || entry.memorySupplement) && !isChatOfflineEntry(entry)) bucket.story.push(entry);
+            continue;
+        }
+        if (source === "vn") {
+            if (appId !== "vn" || entry.memorySupplement) bucket.vn.push(entry);
+            continue;
+        }
+        if (source === "map") { bucket.map.push(entry); continue; }
+        if (source === "game") { bucket.game.push(entry); continue; }
+        if (source === "diary") {
+            if (entry.sourceDetail === "diary_entry") bucket.diary.push(entry);
+            else if (entry.sourceDetail === "notewall") bucket.noteWall.push(entry);
+            continue;
+        }
+        if (source === "xiaohongshu") { bucket.xiaohongshu.push(entry); continue; }
+        if (source === "checkphone") { bucket.checkPhone.push(entry); continue; }
+        if (source === "interview_magazine") { bucket.interview.push(entry); continue; }
+        if (source === "cocreate") { bucket.cocreate.push(entry); continue; }
+        if (source === "custom_app") { bucket.customApp.push(entry); continue; }
+        if (source === "chat") {
+            if (isChatOfflineEntry(entry)) {
+                if (entry.groupSessionId) bucket.offlineGroupChat.push(entry);
+                else bucket.offlineDirectChat.push(entry);
+            } else if (entry.sourceDetail === "group") {
+                if (entry.groupSessionId !== options?.excludeGroupSessionId) bucket.groupChat.push(entry);
+            } else if (entry.sourceDetail === "direct") {
+                if (skipDirectChatEntries) {
+                    // 只有「其他会话」或「未被当前历史覆盖的补充记忆」才单独成块
+                    if (entry.sessionId !== options?.excludeChatSessionId
+                        || (entry.memorySupplement && !currentHistoryKeys.has(`${entry.sessionId}\u0000${entry.id}`))) {
+                        bucket.otherDirectChat.push(entry);
+                    }
+                } else {
+                    bucket.directChat.push(entry);
+                }
+            }
         }
     }
 
-    const theaterEntries = timeline.filter(e => e.sourceApp === "story" && e.sourceDetail === "black_market_theater");
-    if (theaterEntries.length > 0) {
-        raw.push({ tag: "recent_theater", order: FEATURE_ORDER.theater, entries: theaterEntries });
+    if (bucket.moments.length > 0) {
+        raw.push({ tag: "recent_moments", order: FEATURE_ORDER.moments, entries: bucket.moments });
     }
-
-    if (appId !== "vn" || timeline.some(entry => entry.sourceApp === "vn" && entry.memorySupplement)) {
-        const vnEntries = timeline.filter(e => e.sourceApp === "vn" && (appId !== "vn" || e.memorySupplement));
-        if (vnEntries.length > 0) {
-            raw.push({ tag: "recent_events", order: FEATURE_ORDER.vn, entries: vnEntries });
-        }
+    if (bucket.story.length > 0) {
+        raw.push({ tag: "recent_events", order: FEATURE_ORDER.story, entries: bucket.story });
     }
-
+    if (bucket.theater.length > 0) {
+        raw.push({ tag: "recent_theater", order: FEATURE_ORDER.theater, entries: bucket.theater });
+    }
+    if (bucket.vn.length > 0) {
+        raw.push({ tag: "recent_events", order: FEATURE_ORDER.vn, entries: bucket.vn });
+    }
     // Map adventure projections — skip in adventure mode (already has full journal/stream context)
-    if (appId !== "adventure") {
-        const mapEventEntries = timeline.filter(e => e.sourceApp === "map");
-        if (mapEventEntries.length > 0) {
-            raw.push({ tag: "recent_game", order: FEATURE_ORDER.map, entries: mapEventEntries });
-        }
+    if (appId !== "adventure" && bucket.map.length > 0) {
+        raw.push({ tag: "recent_game", order: FEATURE_ORDER.map, entries: bucket.map });
     }
-
-    const gameEventEntries = timeline.filter(e => e.sourceApp === "game");
-    if (gameEventEntries.length > 0) {
-        raw.push({ tag: "recent_game", order: FEATURE_ORDER.game, entries: gameEventEntries });
+    if (bucket.game.length > 0) {
+        raw.push({ tag: "recent_game", order: FEATURE_ORDER.game, entries: bucket.game });
     }
-
-    const diaryEntries = timeline.filter(e => e.sourceApp === "diary" && e.sourceDetail === "diary_entry");
-    if (diaryEntries.length > 0) {
-        raw.push({ tag: "recent_diary", order: FEATURE_ORDER.diary_entry, entries: diaryEntries });
+    if (bucket.diary.length > 0) {
+        raw.push({ tag: "recent_diary", order: FEATURE_ORDER.diary_entry, entries: bucket.diary });
     }
-
-    const noteWallEntries = timeline.filter(e => e.sourceApp === "diary" && e.sourceDetail === "notewall");
-    if (noteWallEntries.length > 0) {
-        raw.push({ tag: "recent_notewall", order: FEATURE_ORDER.notewall, entries: noteWallEntries });
+    if (bucket.noteWall.length > 0) {
+        raw.push({ tag: "recent_notewall", order: FEATURE_ORDER.notewall, entries: bucket.noteWall });
     }
-
-    const xiaohongshuEntries = timeline.filter(e => e.sourceApp === "xiaohongshu");
-    if (xiaohongshuEntries.length > 0) {
-        raw.push({ tag: "recent_xiaohongshu", order: FEATURE_ORDER.xiaohongshu, entries: xiaohongshuEntries });
+    if (bucket.xiaohongshu.length > 0) {
+        raw.push({ tag: "recent_xiaohongshu", order: FEATURE_ORDER.xiaohongshu, entries: bucket.xiaohongshu });
     }
-
-    const checkPhoneEntries = timeline.filter(e => e.sourceApp === "checkphone");
-    if (checkPhoneEntries.length > 0) {
-        raw.push({ tag: "recent_checkphone", order: FEATURE_ORDER.checkphone, entries: checkPhoneEntries });
+    if (bucket.checkPhone.length > 0) {
+        raw.push({ tag: "recent_checkphone", order: FEATURE_ORDER.checkphone, entries: bucket.checkPhone });
     }
-
-    const interviewEntries = timeline.filter(e => e.sourceApp === "interview_magazine");
-    if (interviewEntries.length > 0) {
-        raw.push({ tag: "recent_interview", order: FEATURE_ORDER.interview, entries: interviewEntries });
+    if (bucket.interview.length > 0) {
+        raw.push({ tag: "recent_interview", order: FEATURE_ORDER.interview, entries: bucket.interview });
     }
-
-    const cocreateEntries = timeline.filter(e => e.sourceApp === "cocreate");
-    if (cocreateEntries.length > 0) {
-        raw.push({ tag: "recent_cocreate", order: FEATURE_ORDER.cocreate, entries: cocreateEntries });
+    if (bucket.cocreate.length > 0) {
+        raw.push({ tag: "recent_cocreate", order: FEATURE_ORDER.cocreate, entries: bucket.cocreate });
     }
-
-    const customAppEntries = timeline.filter(e => e.sourceApp === "custom_app");
-    if (customAppEntries.length > 0) {
-        raw.push({ tag: "recent_custom_app", order: FEATURE_ORDER.custom_app, entries: customAppEntries });
+    if (bucket.customApp.length > 0) {
+        raw.push({ tag: "recent_custom_app", order: FEATURE_ORDER.custom_app, entries: bucket.customApp });
     }
-
-    const groupChatEntries = timeline.filter(e =>
-        e.sourceApp === "chat"
-        && e.sourceDetail === "group"
-        && e.groupSessionId !== options?.excludeGroupSessionId
-    );
-    if (groupChatEntries.length > 0) {
-        raw.push({ tag: "recent_group_chat", order: FEATURE_ORDER.group_chat, entries: groupChatEntries });
+    if (bucket.groupChat.length > 0) {
+        raw.push({ tag: "recent_group_chat", order: FEATURE_ORDER.group_chat, entries: bucket.groupChat });
     }
-
     // Direct chat from timeline — skipped only when the current history already comes from chat/group_chat.
-    if (!skipDirectChatEntries) {
-        const chatEntries = timeline.filter(e => e.sourceApp === "chat" && e.sourceDetail === "direct");
-        if (chatEntries.length > 0) {
-            raw.push({ tag: "recent_chat", order: FEATURE_ORDER.chat, entries: chatEntries });
-        }
+    if (bucket.directChat.length > 0) {
+        raw.push({ tag: "recent_chat", order: FEATURE_ORDER.chat, entries: bucket.directChat });
     }
-    if (skipDirectChatEntries) {
-        const otherChats = timeline.filter(e => e.sourceApp === "chat" && e.sourceDetail === "direct" && (e.sessionId !== options?.excludeChatSessionId || (e.memorySupplement && !currentHistoryKeys.has(`${e.sessionId}\u0000${e.id}`))));
-        if (otherChats.length) raw.push({ tag: "recent_chat", order: FEATURE_ORDER.chat, entries: otherChats });
+    if (bucket.otherDirectChat.length > 0) {
+        raw.push({ tag: "recent_chat", order: FEATURE_ORDER.chat, entries: bucket.otherDirectChat });
     }
-
-    const offlineGroupChatEntries = timeline.filter(e => isChatOfflineEntry(e) && e.groupSessionId);
-    if (offlineGroupChatEntries.length > 0) {
-        raw.push({ tag: "recent_group_chat", order: FEATURE_ORDER.group_chat, entries: offlineGroupChatEntries });
+    if (bucket.offlineGroupChat.length > 0) {
+        raw.push({ tag: "recent_group_chat", order: FEATURE_ORDER.group_chat, entries: bucket.offlineGroupChat });
     }
-
-    const offlineDirectChatEntries = timeline.filter(e => isChatOfflineEntry(e) && !e.groupSessionId);
-    if (offlineDirectChatEntries.length > 0) {
-        raw.push({ tag: "recent_chat", order: FEATURE_ORDER.chat, entries: offlineDirectChatEntries });
+    if (bucket.offlineDirectChat.length > 0) {
+        raw.push({ tag: "recent_chat", order: FEATURE_ORDER.chat, entries: bucket.offlineDirectChat });
     }
 
     const coReadingEntries = buildCoReadingBoundaryEntries(history, {
@@ -1251,7 +1287,10 @@ export function prepareShortTermContext(
         pool.push(historyPoolItems[i]);
     }
 
-    pool.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    // timestamp 是 ISO 8601 字符串，字典序即时间序，直接用 < / > 比较。
+    // localeCompare 走完整本地化排序规则（重音、大小写、语言差异），
+    // 比原始字符串比较慢一到两个数量级，几百条元素的排序在手机上就是几十毫秒。
+    pool.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
 
     // Truncate from oldest until within budget
     let total = pool.reduce((sum, p) => sum + p.tokens, 0);
@@ -1510,7 +1549,10 @@ export function prepareGroupShortTermContext(
         pool.push(historyPoolItems[i]);
     }
 
-    pool.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    // timestamp 是 ISO 8601 字符串，字典序即时间序，直接用 < / > 比较。
+    // localeCompare 走完整本地化排序规则（重音、大小写、语言差异），
+    // 比原始字符串比较慢一到两个数量级，几百条元素的排序在手机上就是几十毫秒。
+    pool.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
 
     let total = pool.reduce((sum, item) => sum + item.tokens, 0);
     let startIdx = 0;

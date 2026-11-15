@@ -68,7 +68,10 @@ export function mergeShortMemoryEntries(characterId: string, native: NativeTimel
   const map = new Map(native.map(entry => [getNativeTimelineEntryKey(entry), entry]));
   loadManualShortMemories(characterId).forEach(entry => { if (!after || entry.timestamp > after) map.set(getNativeTimelineEntryKey(entry), entry); });
   const hidden = hiddenMemoryKeys(characterId);
-  return [...map.values()].filter(entry => includeDeleted || !isMemoryEntryDeleted(entry, hidden)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  // ISO 8601 字符串字典序即时间序；localeCompare 走本地化排序规则，比原始比较慢一到两个数量级
+  return [...map.values()]
+    .filter(entry => includeDeleted || !isMemoryEntryDeleted(entry, hidden))
+    .sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
 }
 
 /** Exclude deleted current-chat turns too; the original visible chat remains intact. */
