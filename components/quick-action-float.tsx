@@ -25,7 +25,7 @@ import {
     saveImageGenerationSettings,
 } from "@/lib/settings-storage";
 import type { ApiConfig, ApiGroup, BindingConfig, BindingSlot, WorldBookConfig, ImageGenerationSettings } from "@/lib/settings-types";
-import { buildGroupedApiView, toggleApiGroupCollapsed } from "@/lib/api-groups";
+import { buildGroupedApiView, sortApiConfigsByName, toggleApiGroupCollapsed } from "@/lib/api-groups";
 import { applyImageGenerationBinding, getActiveImageGenerationBindingId, getImageGenerationBindingOptions } from "@/lib/image-generation-binding";
 import { fetchImageGenerationModels, fetchNovelAiModels, filterLikelyImageModels, generateImageFromConfiguredApi } from "@/lib/image-generation-service";
 import { NOVELAI_COMMON_MODELS } from "@/lib/novelai-image-config";
@@ -105,7 +105,9 @@ export function QuickActionFloat() {
     const reloadData = useCallback(() => {
         const nextCharacters = loadCharacters();
         setConfig(loadBindingConfig());
-        setApiConfigs(loadApiConfigs());
+        // 快捷面板是「选 API」的场景，按名称排序更好找；这里只排展示副本，
+        // 持久化顺序仍以 loadApiConfigs 的原数组为准（updateApiModel 写回时会还原骨架）。
+        setApiConfigs(sortApiConfigsByName(loadApiConfigs()));
         setApiGroups(loadApiGroups());
         setImageSettings(loadImageGenerationSettings());
         setWorldBooks(loadWorldBooks());
@@ -273,11 +275,16 @@ export function QuickActionFloat() {
 
     const updateApiModel = useCallback((model: string) => {
         if (!activeApiConfig || !model) return;
-        const next = apiConfigs.map(api => api.id === activeApiConfig.id ? { ...api, defaultModel: model } : api);
-        setApiConfigs(next);
-        saveApiConfigs(next);
+        // 本组件的 apiConfigs 是「按名称排序后的展示副本」，直接写回会把名称序
+        // 持久化进存储，导致 API 设置页的卡片顺序跟着变。因此以 loadApiConfigs()
+        // 的原始顺序为骨架，只替换目标条目的 defaultModel。
+        const persisted = loadApiConfigs().map(api =>
+            api.id === activeApiConfig.id ? { ...api, defaultModel: model } : api,
+        );
+        saveApiConfigs(persisted);
+        setApiConfigs(sortApiConfigsByName(persisted));
         setModelStatus({ success: true, message: `已选择模型：${model}` });
-    }, [activeApiConfig, apiConfigs]);
+    }, [activeApiConfig]);
 
     const updateImageBinding = (imageConfigId?: string) => {
         if (scope === "global") {
@@ -364,8 +371,13 @@ export function QuickActionFloat() {
                     ? payload.data.map((item: { id?: string }) => String(item.id || "")).filter(Boolean)
                     : [];
             if (models.length === 0) throw new Error("接口没有返回可用模型");
-            setFetchedModels(previous => ({ ...previous, [activeApiConfig.id]: models }));
-            setModelStatus({ success: true, message: `已拉取 ${models.length} 个模型` });
+            // 去重 + 自然序：同系列（claude-* / gemini-* / gpt-*）聚在一起，
+            // 且 gpt-4 / gpt-4o / gpt-5 按数字序而非字典序。
+            const sortedModels = Array.from(new Set<string>(models)).sort((a, b) =>
+                a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
+            );
+            setFetchedModels(previous => ({ ...previous, [activeApiConfig.id]: sortedModels }));
+            setModelStatus({ success: true, message: `已拉取 ${sortedModels.length} 个模型` });
         } catch (error) {
             setModelStatus({ success: false, message: `拉取失败：${error instanceof Error ? error.message : String(error)}` });
         } finally {
