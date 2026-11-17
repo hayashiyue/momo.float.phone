@@ -40,6 +40,78 @@ let consuming = false;
 let lastConsumeAt = 0;
 let consumerInstalled = false;
 let consumeRequestTimer: number | null = null;
+
+// 本地幂等记忆：记住最近已落库的 outbox 条目 id。
+// 回执（ack）是网络请求，失败时条目会留在服务端，下一轮（5 分钟后）又被拉回来。
+// 没有这层记忆时，同一条云端消息会被反复 parseAndSaveResponse 一遍遍插进聊天记录，
+// 表现为「零碎地、多次地凭空多出几条」。id 只增不减，1% 命中即可短路。
+const CONSUMED_OUTBOX_IDS_MAX = 200;
+const CONSUMED_OUTBOX_IDS_STORAGE_KEY = "ai_phone_consumed_outbox_ids_v1";
+const consumedOutboxIds: string[] = [];
+const consumedOutboxIdSet = new Set<string>();
+
+// 从 localStorage 恢复：ack 失败后若用户刷新/重开 App，内存集合会清空，
+// 那条没销账的云端消息又会被拉回来重复插入。持久化后跨会话也拦得住。
+(function restoreConsumedOutboxIds() {
+    try {
+        const raw = localStorage.getItem(CONSUMED_OUTBOX_IDS_STORAGE_KEY);
+        if (!raw) return;
+        const parsed: unknown = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return;
+        for (const item of parsed) {
+            if (typeof item !== "string" || !item || consumedOutboxIdSet.has(item)) continue;
+            consumedOutboxIdSet.add(item);
+            consumedOutboxIds.push(item);
+        }
+    } catch { /* 读失败就当空集合 */ }
+})();
+
+function flushConsumedOutboxIds(): void {
+    try {
+        localStorage.setItem(CONSUMED_OUTBOX_IDS_STORAGE_KEY, JSON.stringify(consumedOutboxIds));
+    } catch { /* 写失败不影响本次运行 */ }
+}
+
+// 本轮合并开始前，各会话的本地基准。过期判定必须用这份「冻结」的快照比对：
+// 若实时读，离线期间云端连发第 1 条落库后，第 2、3 条就会把刚插入的消息当成
+// 「用户已经往前走了」的证据，全部误判为过期。
+type SessionBaseline = { lastUserMsgId: string; lastUserMsgAtMs: number; lastMsgAtMs: number };
+const preMergeSessionBaseline = new Map<string, SessionBaseline>();
+
+function snapshotSessionBaseline(sessionId: string): SessionBaseline {
+    const cached = preMergeSessionBaseline.get(sessionId);
+    if (cached) return cached;
+    const messages = loadChatMessages(sessionId);
+    let lastUserMsgId = "";
+    let lastUserMsgAtMs = 0;
+    let lastMsgAtMs = 0;
+    for (const message of messages) {
+        const at = Date.parse(message.createdAt);
+        if (Number.isFinite(at) && at > lastMsgAtMs) lastMsgAtMs = at;
+    }
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i].role === "user") {
+            lastUserMsgId = messages[i].id;
+            const at = Date.parse(messages[i].createdAt);
+            lastUserMsgAtMs = Number.isFinite(at) ? at : 0;
+            break;
+        }
+    }
+    const baseline: SessionBaseline = { lastUserMsgId, lastUserMsgAtMs, lastMsgAtMs };
+    preMergeSessionBaseline.set(sessionId, baseline);
+    return baseline;
+}
+
+function rememberConsumedOutboxId(id: string): void {
+    if (!id || consumedOutboxIdSet.has(id)) return;
+    consumedOutboxIdSet.add(id);
+    consumedOutboxIds.push(id);
+    while (consumedOutboxIds.length > CONSUMED_OUTBOX_IDS_MAX) {
+        const dropped = consumedOutboxIds.shift();
+        if (dropped) consumedOutboxIdSet.delete(dropped);
+    }
+    flushConsumedOutboxIds();
+}
 const OUTBOX_BATCH_SIZE = 20;
 const MAX_OUTBOX_BATCHES_PER_PASS = 10;
 const OUTBOX_FOREGROUND_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -66,6 +138,8 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
     consuming = true;
     lastConsumeAt = Date.now();
     const passStartMs = Date.now();
+    // 每轮消费重置会话基准：本轮期间合并进来的云端消息不能污染过期判定
+    preMergeSessionBaseline.clear();
     try {
         // 共享回传箱已停用，只读取用户自己的 Supabase。
         const sources: Array<"personal" | "shared"> = ["personal"];
@@ -84,6 +158,12 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
             const consumedIds: string[] = [];
             for (const entry of entries) {
                 try {
+                    // 本地幂等：这条已经落过库了（上一轮 ack 失败导致服务端还留着），
+                    // 只补一次 ack，绝不再 parseAndSaveResponse 插一遍。
+                    if (consumedOutboxIdSet.has(entry.id)) {
+                        consumedIds.push(entry.id);
+                        continue;
+                    }
                     if (entry.trigger_key && handledTriggerKeys.has(entry.trigger_key)) {
                         consumedIds.push(entry.id);
                         continue;
@@ -142,6 +222,7 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                         ) {
                             saveScreenChatAck(bridgeMeta.screenChatCharacterId, Number(bridgeMeta.screenChatSequence));
                         }
+                        rememberConsumedOutboxId(entry.id);
                         consumedIds.push(entry.id);
                         if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
                         continue;
@@ -175,37 +256,82 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                         continue;
                     }
 
+                    // 注意：periodCare / idleReconnect 的本地状态更新（标记本周期已触发、
+                    // 冷场重连连发计数 +1）必须放在下面的过期判定之后。它们是副作用，
+                    // 若在被判为过期废单的条目上也执行，会白白消耗一次连发额度、
+                    // 或把本周期关怀永久标记为已触发。
                     const periodCare = (meta as { periodCare?: { characterId?: string; cycleKey?: string } }).periodCare;
-                    if (periodCare?.characterId && periodCare.cycleKey) {
-                        const { saveMenstrualPeriodCareTrigger } = await import("./menstrual-storage");
-                        saveMenstrualPeriodCareTrigger({ characterId: periodCare.characterId, sessionId, cycleKey: periodCare.cycleKey });
-                    }
-
                     const idleMeta = (meta as { idleReconnect?: { ruleId?: string; firedAt?: number } }).idleReconnect;
-                    if (idleMeta?.ruleId) {
-                        const { markIdleReconnectFired } = await import("./idle-reconnect-storage");
-                        markIdleReconnectFired(idleMeta.ruleId, typeof idleMeta.firedAt === "number" ? idleMeta.firedAt : Date.now());
-                    }
 
                     const followUpIndex = typeof meta.followUpIndex === "number" ? meta.followUpIndex : undefined;
                     const existingMessages = loadChatMessages(sessionId);
                     if (followUpIndex && existingMessages.some(m => m.role === "assistant" && m.followUpIndex === followUpIndex)) {
                         clearTimedWakeIfHandled(entry.trigger_key);
+                        rememberConsumedOutboxId(entry.id);
                         consumedIds.push(entry.id);
                         if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
                         continue;
                     }
 
+                    // 过期判定：建单快照基准。
+                    //
+                    // 云端用的请求体是「挂单那一刻」冻结的上下文。只要用户在挂单
+                    // 之后又发过消息，本地就已经往前走了，而这份快照仍停在建单那
+                    // 一刻。此时若放行，AI 会把几小时前的旧话题当成刚发生的事重说
+                    // 一遍，还带着触发时刻的时间戳插进聊天记录。
+                    //
+                    // 关键：比对的是「本轮 consumeServerOutbox 开始前」的会话基准，
+                    // 不是实时读到的最后一条。否则离线期间云端连发的第 2、3 条会
+                    // 因为第 1 条刚刚落库而全部被判为过期——那样连发消息就全废了。
+                    // 基准用「最后一条 user 消息」：只有用户自己说话才代表本地往前走。
+                    const baseline = snapshotSessionBaseline(sessionId);
+                    const snapshotLastUserMsgId = typeof (meta as { snapshotLastUserMsgId?: unknown }).snapshotLastUserMsgId === "string"
+                        ? (meta as { snapshotLastUserMsgId: string }).snapshotLastUserMsgId
+                        : "";
+                    const armedAtMs = typeof (meta as { armedAt?: unknown }).armedAt === "string"
+                        ? Date.parse((meta as { armedAt: string }).armedAt)
+                        : NaN;
+
+                    // 三条并列判定，任一命中即视为过期废单。
+                    // 全部基于 baseline（本轮消费开始前的冻结快照），所以离线期间
+                    // 云端连发的第 2、3 条不会把第 1 条刚落库的消息当成「本地已推进」
+                    // 的证据——那时 baseline 早已定格，不会增长。
                     const armAtMs = typeof meta.armAt === "string" ? Date.parse(meta.armAt) : NaN;
-                    if (Number.isFinite(armAtMs) && existingMessages.some(m => {
-                        if (m.role !== "assistant") return false;
-                        const createdMs = Date.parse(m.createdAt);
-                        return createdMs > armAtMs && createdMs < passStartMs;
-                    })) {
+                    // 三条并列判定，任一命中即视为过期废单。
+                    //
+                    // 关键区分：比对建单时刻(armedAt) 要看「用户消息」，比对预定触发
+                    // 时刻(armAt) 才看「任意消息」。
+                    // 因为角色自己的主动消息是 assistant 消息，会推高 lastMsgAtMs。
+                    // 若拿 armedAt 去比 lastMsgAtMs，那么「9:00 云端发了第 1 条，
+                    // 9:10 用户打开手机落库，10:00 云端发第 2 条」这个再正常不过的
+                    // 场景里，第 2 条会因为 lastMsgAtMs(9:00) > armedAt(8:00) 被误杀。
+                    // 而用户在 8:05 回过话，只有 lastUserMsgAtMs 才会推进——用它对
+                    // armedAt 比对，既拦得住「用户已经聊过」，又不会误伤主动连发。
+                    const isStale = Boolean(baseline) && (
+                        // 一：挂单后用户又发过消息（最后一条 user 消息变了）
+                        (Boolean(snapshotLastUserMsgId) && Boolean(baseline.lastUserMsgId)
+                            && baseline.lastUserMsgId !== snapshotLastUserMsgId)
+                        // 二：挂单之后用户发过消息（用 user 消息时间，留 2 秒宽限）
+                        || (Number.isFinite(armedAtMs) && baseline.lastUserMsgAtMs > armedAtMs + 2000)
+                        // 三：预定触发时刻之后本地已经聊过（这里用任意消息时间才对）
+                        || (Number.isFinite(armAtMs) && baseline.lastMsgAtMs > armAtMs)
+                    );
+                    if (isStale) {
                         clearTimedWakeIfHandled(entry.trigger_key);
+                        rememberConsumedOutboxId(entry.id);
                         consumedIds.push(entry.id);
                         if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
                         continue;
+                    }
+
+                    // 确认这条会真正落库之后，才更新本地状态副作用
+                    if (periodCare?.characterId && periodCare.cycleKey) {
+                        const { saveMenstrualPeriodCareTrigger } = await import("./menstrual-storage");
+                        saveMenstrualPeriodCareTrigger({ characterId: periodCare.characterId, sessionId, cycleKey: periodCare.cycleKey });
+                    }
+                    if (idleMeta?.ruleId) {
+                        const { markIdleReconnectFired } = await import("./idle-reconnect-storage");
+                        markIdleReconnectFired(idleMeta.ruleId, typeof idleMeta.firedAt === "number" ? idleMeta.firedAt : Date.now());
                     }
 
                     let text = stripHallucinatedTimestamps(entry.raw_text.trim());
@@ -245,6 +371,7 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
                     );
                     if (hasVisible && newCount < 10) scheduleFollowUp(sessionId, newCount, stateValues);
                     clearTimedWakeIfHandled(entry.trigger_key);
+                    rememberConsumedOutboxId(entry.id);
                     consumedIds.push(entry.id);
                     if (entry.trigger_key) handledTriggerKeys.add(entry.trigger_key);
                 } catch (err) {

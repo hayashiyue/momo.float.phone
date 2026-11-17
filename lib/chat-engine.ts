@@ -3,6 +3,7 @@
 import { createSseJsonParser } from "./sse-json";
 import { maybeAppendShortcutCapability } from "./offline-shortcut-capability";
 import { loadCharacters } from "./character-storage";
+import { beginGeneration, endGeneration } from "./generation-lock";
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
 import { buildChatPluginPromptFragments } from "./chat-plugin-storage";
@@ -2765,12 +2766,18 @@ export async function generateChatCompletion(
         shortcutCompleted: false,
         shortcutCancelled: false,
     };
+    // 全局生成锁：让后台任务（长期记忆总结、离线快照组装）在生成本身进行期间
+    // 主动退避。此前 generation-lock 只有调用方没有获取方，计数恒为 0，那道退避
+    // 一直是失效的——后台组装与前台生成撞在同一时间窗口，是「生成卡好几秒、
+    // 内存峰值翻倍闪退」的一条实际来源。
+    beginGeneration();
     try {
         return await generateChatCompletionCore(session, history, options, callbacks, bailoutRef);
     } catch (err) {
         if (options?.signal?.aborted) bailoutRef.shortcutCancelled = true;
         throw err;
     } finally {
+        endGeneration();
         bailoutRef.closed = true;
         bailoutRef.current?.settle();
         for (const handle of bailoutRef.shortcutHandles) {

@@ -83,6 +83,7 @@ import { parseOfflineResponse, extractThinkingTag, type ParsedOfflineResponse } 
 import { buildProviderRequest, nativeToolProtocolForConfig, toLlmRequestMessages, type LlmRequestMessage, type LlmToolCall } from "./llm-provider-adapter";
 import type { DebugPromptSnapshot } from "./debug-store";
 import { throwIfAborted } from "./abort-utils";
+import { beginGeneration, endGeneration } from "./generation-lock";
 import { buildCharacterTimeContext, buildGroupTimeContext } from "./character-time";
 import { getPromptTimestampOptionsForTimeContext } from "./prompt-time";
 
@@ -820,6 +821,21 @@ async function runNativeGroupToolLoop(params: {
  * All characters' data is assembled into one prompt, AI responds as all characters.
  */
 export async function generateGroupChatCompletion(
+    session: ChatSession,
+    history: ChatMessage[],
+    callbacks?: ChatCompletionCallbacks,
+    options?: GroupChatPromptBuildOptions & { signal?: AbortSignal; skipMemorySummarization?: boolean },
+): Promise<{ characterId: string; characterName: string; responseText: string }[]> {
+    // 全局生成锁：让后台任务（长期记忆总结、离线快照组装）在群聊生成期间退避
+    beginGeneration();
+    try {
+        return await generateGroupChatCompletionInner(session, history, callbacks, options);
+    } finally {
+        endGeneration();
+    }
+}
+
+async function generateGroupChatCompletionInner(
     session: ChatSession,
     history: ChatMessage[],
     callbacks?: ChatCompletionCallbacks,

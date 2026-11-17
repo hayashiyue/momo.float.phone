@@ -36,6 +36,7 @@ import { getStatusRegionConfig, isCustomStatusRegionActive } from "./chat-status
 import { isKnownStickerLabel } from "./sticker-data";
 import { loadCharacters } from "./character-storage";
 import { bgSetInterval, bgSetTimeout } from "./bg-timer";
+import { hasActiveGenerationLock } from "./generation-lock";
 import { dispatchChatMessageNotice } from "./chat-notification-events";
 import { settleShoppingPaymentRequest } from "./shopping-payment-request";
 import {
@@ -199,6 +200,14 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
         return;
     }
 
+    // 冷场重连的空闲计时从「AI 刚回复完」重新起算。
+    //
+    // 必须放在下面几个焦虑度 early-return 之前：绝大多数正常聊天里角色没有
+    // 状态栏、或焦虑度低于阈值，函数会在下面直接 return。若把这行放在末尾，
+    // 冷场重连就永远等不到重挂——而 cancelFollowUp 已经撤掉了云端旧单，
+    // 结果就是这项功能彻底瘫痪。
+    scheduleIdleBailoutRefresh(sessionId);
+
     if (!stateValues || stateValues.length === 0) {
         console.log(`[FollowUp] No state values, not scheduling.`);
         clearFollowUpSchedule(sessionId);
@@ -228,8 +237,19 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
     const fireAt = Date.now() + delaySec * 1000;
     console.log(`[FollowUp] Anxiety-driven: value=${anxietyEntry.value}, delay=${delaySec}s, session=${sessionId}, count=${count}`);
     saveFollowUpSchedule({ sessionId, fireAt, count, delaySec });
-    // 离线推送兜底：把本轮追问的完整请求快照预约到服务端，App 被杀时由服务端接管
-    void armFollowUpBailout(sessionId, count, delaySec, fireAt);
+    // 离线推送兜底：把本轮追问的完整请求快照预约到服务端，App 被杀时由服务端接管。
+    // 用 bgSetTimeout 延后一拍执行，让出当前渲染帧——此处正是 AI 刚回复完、
+    // 界面正在收尾的时刻，立刻同步组装几十万字提示词会卡住收尾动画。
+    const armWithBackoff = (retriesLeft: number) => {
+        if (typeof document !== "undefined" && document.hidden) return;
+        // 前台正在生成就退避，绝不在用户等待回复时后台组装几十万字提示词
+        if (retriesLeft > 0 && hasActiveGenerationLock()) {
+            bgSetTimeout(() => armWithBackoff(retriesLeft - 1), 10_000);
+            return;
+        }
+        void armFollowUpBailout(sessionId, count, delaySec, fireAt);
+    };
+    bgSetTimeout(() => armWithBackoff(3), 2_000);
 }
 
 export async function requestBackgroundChatReply(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
@@ -285,9 +305,25 @@ export async function requestBackgroundChatReply(sessionId: string): Promise<{ o
 export function cancelFollowUp(sessionId: string) {
     clearFollowUpSchedule(sessionId);
     cancelFollowUpBailout(sessionId);
-    // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约
+    // 用户发了消息：冷场重连计数清零，并立即撤销服务端上本轮旧单。
+    //
+    // 这里绝不能重挂 armIdleReconnectBailout：
+    // 1) chat-room 的 handleSendText 里这个调用发生在 pushChatMessage 之前，
+    //    此刻新消息还没落库，读到的历史最后一句仍是上一条旧消息。拿这份旧
+    //    历史组装的快照挂到云端，到点触发时 AI 会把旧话题当成新话题重说一遍。
+    // 2) 这份组装是纯同步重活（14 模块时间线 + 全部世界书 + 预设 + 双份
+    //    buildProviderRequest + 最多 800KB JSON），会和紧接着的前台生成撞在
+    //    同一时间窗口，主线程被占满、内存峰值翻倍，表现为「发送后一两秒卡好几秒」。
+    // 重挂统一延后到 AI 回复完成后的 scheduleFollowUp（见 scheduleBailoutRefresh）。
     const idleRule = resetIdleReconnectForSession(sessionId);
-    if (idleRule) void armIdleReconnectBailout({ ...idleRule, consecutiveCount: 0 });
+    if (idleRule) {
+        void cancelBailoutPrefix(`idle:${idleRule.id}:`);
+        // 用户发消息 = 新一轮空闲计时起点。这里只是排一个 15 秒防抖计时器，
+        // 不做任何组装；用户随后点生成、AI 回复完 scheduleFollowUp 会重置它。
+        // 万一用户发完消息就退出、没等 AI 回复，15 秒后也会兜底挂上包含这条
+        // 新消息的快照，冷场重连不会断链。
+        scheduleIdleBailoutRefresh(sessionId);
+    }
     // If an API call is already in-flight, mark it for cancellation
     if (firingSet.has(sessionId)) {
         cancelledWhileFiring.add(sessionId);
@@ -295,6 +331,34 @@ export function cancelFollowUp(sessionId: string) {
 }
 
 // ── Internals ──────────────────────────────────────────────
+
+// 冷场重连的服务端快照重挂：防抖延后，避开与前台生成抢主线程。
+//
+// 每挂一次都要完整跑一遍 buildChatPromptMessages（14 模块时间线 + 全部世界书
+// + 预设 + 双份 buildProviderRequest + 最多 800KB JSON 序列化）。用户热聊时
+// 每句话都会触发一次，若立即执行就会和紧接着的前台生成撞在同一时间窗口，
+// 主线程被占满、内存峰值翻倍。延后到用户真正停下来之后再挂，且热聊期间
+// 计时器被不断重置，一次组装都不会跑。
+const IDLE_BAILOUT_REFRESH_DELAY_MS = 15_000;
+const idleBailoutRefreshTimers = new Map<string, () => void>();
+
+function scheduleIdleBailoutRefresh(sessionId: string): void {
+    const existing = idleBailoutRefreshTimers.get(sessionId);
+    if (existing) existing();
+    const fire = (remainingRetries: number) => {
+        idleBailoutRefreshTimers.delete(sessionId);
+        if (typeof document !== "undefined" && document.hidden) return;
+        // 前台正在生成就退避，绝不在用户等待回复时后台组装几十万字提示词
+        if (remainingRetries > 0 && hasActiveGenerationLock()) {
+            idleBailoutRefreshTimers.set(sessionId, bgSetTimeout(() => fire(remainingRetries - 1), 10_000));
+            return;
+        }
+        const rule = loadIdleReconnectRules().find(item => item.sessionId === sessionId);
+        if (!rule) return;
+        void armIdleReconnectBailout(rule);
+    };
+    idleBailoutRefreshTimers.set(sessionId, bgSetTimeout(() => fire(3), IDLE_BAILOUT_REFRESH_DELAY_MS));
+}
 
 function delay(ms: number): Promise<void> {
     // Worker 定时器：iOS 后台会冻结主线程 setTimeout，逐条弹出的间隔若用它，
