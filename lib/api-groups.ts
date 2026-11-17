@@ -20,6 +20,21 @@ export type GroupedApiView = {
 };
 
 /**
+ * 纯展示用的按名称排序（不改存储顺序）。
+ * 只在下拉选择器 / 列表渲染时调用；saveApiConfigs 仍按原始数组顺序落库，
+ * 因此拖拽排序、configs[0] 默认取值、文件夹归属全都不受影响。
+ * numeric: true 让 1-xxx / 2-xxx / 10-xxx 按自然数序排列而非字典序。
+ */
+export function sortApiConfigsByName(configs: ApiConfig[]): ApiConfig[] {
+    return [...configs].sort((a, b) =>
+        (a.name || a.provider || "").localeCompare(b.name || b.provider || "", "zh-CN", {
+            numeric: true,
+            sensitivity: "base",
+        }),
+    );
+}
+
+/**
  * 按文件夹顺序分组；groupId 指向不存在文件夹的条目自动归入 ungrouped（防御孤儿引用）。
  */
 export function buildGroupedApiView(configs: ApiConfig[], groups: ApiGroup[]): GroupedApiView {

@@ -62,6 +62,7 @@ import {
     ensureSettingsStorageHydrated,
 } from "@/lib/settings-storage";
 import { getActiveImageGenerationBindingId, getImageGenerationBindingOptions } from "@/lib/image-generation-binding";
+import { sortApiConfigsByName } from "@/lib/api-groups";
 import { hydrateKvDb } from "@/lib/kv-db";
 import type { UserIdentity } from "@/components/settings/user-identity";
 import { loadCharacters } from "@/lib/character-storage";
@@ -134,7 +135,10 @@ export function BindingManager() {
     const [isLoaded, setIsLoaded] = useState(false);
 
     const reloadData = () => {
-        setApiConfigs(loadApiConfigs());
+        // 本页只负责把 API 绑到功能/角色上，从不回写顺序；
+        // 在这里统一按名称排序，即可覆盖全局绑定、角色绑定、分应用绑定
+        // 与五个辅助功能（记忆总结/向量/小卷/思维链/工坊）的全部选择弹窗。
+        setApiConfigs(sortApiConfigsByName(loadApiConfigs()));
         setImageSettings(loadImageGenerationSettings());
         setVoiceConfigs(loadVoiceConfigs());
         setPresets(loadPresets());

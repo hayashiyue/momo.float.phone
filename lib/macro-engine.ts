@@ -6,6 +6,42 @@ import { buildCharacterTimeContext, getSystemTimeZone } from "./character-time";
 
 const TRIM_SENTINEL = "\x00TRIM\x00";
 
+// ── 纯静态宏展开缓存 ──────────────────────────────────────────
+// 判定「整段文本只含 {{char}} / {{user}} / {{trim}}」后，展开结果只与角色名、用户名有关。
+// 缓存键带上 charName 与 userName，换角色卡自然失效；用 Map 有界防止无限增长。
+const STATIC_MACRO_CACHE_LIMIT = 800;
+const _staticMacroExpandCache = new Map<string, string>();
+// 出现任何一个非静态宏（动态值、变量读写、随机数、未识别占位符等）就放弃缓存。
+// 注意：必须与实际 resolve 支持的静态宏集合保持一致，宁可少缓存也不能缓存错。
+// 必须与 resolve() 的实际分支严格逐字符一致：那边用的是 body === "char" /
+// "user" / "trim"，既不 trim 也不忽略大小写。这里放宽只会把 resolve 不认识的
+// {{CHAR}} / {{ char }} 误判为静态（它们会被原样返回，结果虽仍不变，
+// 但白名单与实际行为不一致会让后续维护者误以为支持这些写法）。
+const STATIC_MACRO_ALLOWED_RE = /^\{\{(?:char|user|trim|\/\/[^{}]*)\}\}$/;
+
+function isPurelyStaticMacroText(text: string): boolean {
+    // 关键防线：只要存在嵌套花括号（如 {{getvar::{{char}}}}）就直接放弃缓存。
+    // 原因：下面的 tokenRe 用了 [^{}]*?，只能匹配到**最内层**的 {{char}}，
+    // 外层的 {{getvar::...}} 因中间夹着花括号而完全漏检 —— 若不先拦截，
+    // 这类「外层是动态宏、内层是静态宏」的结构会被误判为纯静态，
+    // 从而把随轮次变化的变量值永久缓存住。
+    if (/\{\{[^{}]*\{\{/.test(text)) return false;
+    // 局部正则：带 g 标志的 RegExp 会携带 lastIndex 状态，
+    // 模块级共享会在重入（同一 tick 内嵌套调用）时互相污染。
+    const tokenRe = /\{\{([^{}]*?)\}\}/g;
+    let match: RegExpExecArray | null;
+    let found = false;
+    while ((match = tokenRe.exec(text)) !== null) {
+        found = true;
+        if (!STATIC_MACRO_ALLOWED_RE.test(match[0])) return false;
+    }
+    // 上一行已经保证 text 含 "{{"，若一个 token 都没匹配到（例如孤立的花括号），
+    // 说明结构异常，同样不缓存。
+    return found;
+}
+
+
+
 export class MacroEngine {
     localVars: Map<string, string> = new Map();
     globalVars: Map<string, string> = new Map();
@@ -109,6 +145,29 @@ export class MacroEngine {
         // includes("{{") 是引擎内建的子串查找，比正则快一到两个数量级，且语义完全等价：
         // 不含 "{{" 的字符串不可能被该正则匹配到任何内容。
         if (!text || !text.includes("{{")) return text;
+        // 纯静态宏缓存：只含 {{char}} / {{user}}（以及 {{trim}} 哨兵）的条目，
+        // 其展开结果只取决于 charName 与 userName。世界书里 95% 的含宏条目属于这一类，
+        // 只要角色名/用户名不变，展开结果恒等 —— 命中即可跳过全部正则迭代。
+        // 含任何动态宏（{{time}} / {{state}} / {{getvar}} / {{random}} …）的文本一律不缓存。
+        // 名字本身若含 "{{"，替换进去会引入新的宏，后续轮次可能解析出动态值
+        // （例如角色名被写成 "{{random::A::B}}"），此时结果不再恒定，不能缓存。
+        if (!this.charName.includes("{{") && !this.userName.includes("{{")
+            && isPurelyStaticMacroText(text)) {
+            const cacheKey = `${this.charName}\u0000${this.userName}\u0000${text}`;
+            const cached = _staticMacroExpandCache.get(cacheKey);
+            if (cached !== undefined) return cached;
+            const expanded = this.expandUncached(text);
+            if (_staticMacroExpandCache.size >= STATIC_MACRO_CACHE_LIMIT) {
+                const oldest = _staticMacroExpandCache.keys().next().value;
+                if (oldest !== undefined) _staticMacroExpandCache.delete(oldest);
+            }
+            _staticMacroExpandCache.set(cacheKey, expanded);
+            return expanded;
+        }
+        return this.expandUncached(text);
+    }
+
+    private expandUncached(text: string): string {
         const MAX_ITERATIONS = 50;
         let result = text;
         for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -368,6 +427,9 @@ export class MacroEngine {
 
 /** Post-process: remove {{trim}} sentinels and surrounding newlines. */
 export function postProcessTrim(text: string): string {
+    // 不含 trim 哨兵的文本（绝大多数世界书/预设条目）直接返回，省掉一次全文正则。
+    // 注意：原正则以 \n* 开头，无法走首字符快速跳转，对每条条目都是纯线性扫描。
+    if (!text || !text.includes(TRIM_SENTINEL)) return text;
     // Remove trim sentinels along with any surrounding newlines
     return text.replace(/\n*\x00TRIM\x00\n*/g, "");
 }

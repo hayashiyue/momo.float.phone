@@ -287,8 +287,16 @@ function pushNativeToolHistoryBlock(params: {
 }
 
 function mergeMarkerText(base?: string, next?: string): string | undefined {
+    // 合并几十上百个相邻块时，原实现对每次合并都做 split + map + filter + Set + join，
+    // 整体是 O(n²) 的临时数组分配。下面三条短路把常见情况降到 O(1)：
+    // 仅用于提示词查看器的 _debugMeta.marker，不影响发给模型的任何内容。
+    if (!base) return next?.trim() || undefined;
+    if (!next) return base;
+    if (base === next) return base;
+    if (base.includes(next)) return base;
+    if (next.includes(base)) return next;
     const parts = [base, next]
-        .flatMap(value => (value ? value.split(" + ") : []))
+        .flatMap(value => value.split(" + "))
         .map(part => part.trim())
         .filter(Boolean);
     if (parts.length === 0) return undefined;
@@ -840,8 +848,11 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                     // 再对拼好的整块跑一次 expand 会把几百条世界书当一个大字符串全文扫，
                     // 正是「世界书多时点生成卡好几秒」的来源。其余 marker 照常展开。
                     if (!MACRO_ALREADY_EXPANDED_MARKERS.has(p.identifier)) {
-                        markerContent = engine.expand(markerContent);
-                        markerContent = postProcessTrim(markerContent).trim();
+                        // 人设/记忆/关系/日程等 marker 通常不含宏（尤其记忆与关系是系统生成的纯数据），
+                        // 加一层 includes 判断即可省掉对整块内容的宏正则与 trim 正则。
+                        if (markerContent.includes("{{")) {
+                            markerContent = postProcessTrim(engine.expand(markerContent)).trim();
+                        }
                     }
                     if (markerContent) {
                         const xmlText = wrapXml(toXmlTag(p.identifier), markerContent);
@@ -868,8 +879,14 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
             }
 
             // Expand macros in prompt content
-            let content = engine.expand(p.content);
-            content = postProcessTrim(content).trim();
+            // 不含 "{{" 的条目跳过 expand 与 postProcessTrim（两条全文正则路径），
+            // 预设条目动辄几十条，逐条省下来是可感知的。语义与原来完全一致。
+            let content = p.content;
+            if (content.includes("{{")) {
+                content = postProcessTrim(engine.expand(content)).trim();
+            } else {
+                content = content.trim();
+            }
             if (!content) continue;
 
             const role = normalizeRole(p.role);
@@ -929,8 +946,12 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
         // 与 worldInfoBefore/After 一致：世界书正则候选先筛一次，无候选时逐条直接跳过正则
         const wbAtDepthRegexCandidates = collectPromptRegexCandidates(regexes, 5, activeTags);
         wbAtDepthEntries.forEach(entry => {
-            let content = engine.expand(entry.content);
-            content = postProcessTrim(content).trim();
+            let content = entry.content;
+            if (content.includes("{{")) {
+                content = postProcessTrim(engine.expand(content)).trim();
+            } else {
+                content = content.trim();
+            }
             if (!content) return;
             if (wbAtDepthRegexCandidates.length > 0) {
                 content = applyPromptRegexCandidates(content, wbAtDepthRegexCandidates, { macroEngine: engine, activeTags });
@@ -1190,26 +1211,30 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
     // --- Post-process: merge any remaining consecutive same-role messages ---
     // This catches cases where preset entries (non-history) end up adjacent to
     // history messages with the same role, which can cause API errors.
-    for (let i = finalPayload.length - 1; i > 0; i--) {
-        const cur = finalPayload[i];
-        const prev = finalPayload[i - 1];
-        const canMerge = cur.role === prev.role
+    // 单趟正向构建：与「倒序逐项 splice」语义完全等价（都是后一条并入前一条、
+    // 保留前一条位置），但省掉了 n 次数组中间插入删除的元素搬移。
+    const mergedPayload: LLMMessage[] = [];
+    for (const cur of finalPayload) {
+        const prev = mergedPayload.length > 0 ? mergedPayload[mergedPayload.length - 1] : undefined;
+        const canMerge = prev !== undefined
+            && cur.role === prev.role
             && cur.role !== "tool"
             && !cur.toolCalls?.length
             && !prev.toolCalls?.length
             && typeof cur.content === "string"
             && typeof prev.content === "string";
         if (canMerge) {
-            prev.content = prev.content + "\n\n" + cur.content;
+            prev.content = (prev.content as string) + "\n\n" + cur.content;
             prev._debugMeta = {
                 ...prev._debugMeta,
                 marker: mergeMarkerText(prev._debugMeta?.marker, cur._debugMeta?.marker),
             };
-            finalPayload.splice(i, 1);
+        } else {
+            mergedPayload.push(cur);
         }
     }
 
-    return finalPayload;
+    return mergedPayload;
 }
 
 
@@ -2001,11 +2026,15 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
             activated.filter(e => isWBAtDepthPosition(e)).forEach(entry => {
                 atDepthInjections.push({ entry, engine: bookEngine });
             });
-            const renderJoined = (entries: WorldBookEntry[]): string => {
-                const sorted = [...entries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
-                return postProcessTrim(bookEngine.expand(
-                    sorted.map(e => applyWorldInfoRegex(e.content, regexes, { macroEngine: bookEngine, activeTags })).join("\n\n"),
-                )).trim();
+            const renderJoined = (entries: WorldBookEntry[]): string | null => {
+                // 复用单聊版的逐条展开：先对每条单独 expand，再 join。
+                // 原来的「先 join 成几十万字大块、再整体 expand」会让 includes("{{")
+                // 短路对整块失效，几百条世界书被迫全体跑全文正则。
+                return joinWorldBookEntriesWithMacros(
+                    entries,
+                    regexes,
+                    { macroEngine: bookEngine, activeTags },
+                );
             };
             const beforeText = renderJoined(activated.filter(e => isWBBeforePosition(e)));
             if (beforeText) {
@@ -2107,8 +2136,11 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                     m.characterRelations,
                 );
                 if (markerContent) {
-                    markerContent = engine.expand(markerContent);
-                    markerContent = postProcessTrim(markerContent).trim();
+                    // 与单聊一致：世界书 marker 已在 joinWorldBookEntriesWithMacros 里逐条展开，
+                    // 其余 marker（人设/记忆/关系）通常不含宏，加一层判断省掉整块全文正则。
+                    if (markerContent.includes("{{") && !MACRO_ALREADY_EXPANDED_MARKERS.has(p.identifier)) {
+                        markerContent = postProcessTrim(engine.expand(markerContent)).trim();
+                    }
                     if (markerContent) {
                         sections.push(markerContent);
                     }
@@ -2145,8 +2177,12 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     }
     // 2.6 at-depth 世界书条目(独享+共享,均已去重):照单聊规则插入聊天历史对应深度
     for (const inj of atDepthInjections) {
-        let content = inj.engine.expand(inj.entry.content);
-        content = postProcessTrim(content).trim();
+        let content = inj.entry.content;
+        if (content.includes("{{")) {
+            content = postProcessTrim(inj.engine.expand(content)).trim();
+        } else {
+            content = content.trim();
+        }
         if (!content) continue;
         content = applyWorldInfoRegex(content, regexes, { macroEngine: inj.engine, activeTags });
         blocks.push({
@@ -2216,8 +2252,12 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 continue;
             }
 
-            let content = groupEngine.expand(p.content);
-            content = postProcessTrim(content).trim();
+            let content = p.content;
+            if (content.includes("{{")) {
+                content = postProcessTrim(groupEngine.expand(content)).trim();
+            } else {
+                content = content.trim();
+            }
             if (!content) continue;
 
             const role = normalizeRole(p.role);
@@ -2454,26 +2494,29 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     });
 
     // --- Post-process: merge any remaining consecutive same-role messages ---
-    for (let i = finalPayload.length - 1; i > 0; i--) {
-        const cur = finalPayload[i];
-        const prev = finalPayload[i - 1];
-        const canMerge = cur.role === prev.role
+    // 与单聊版一致：单趟正向构建，避免倒序 splice 的元素搬移。
+    const mergedPayload: LLMMessage[] = [];
+    for (const cur of finalPayload) {
+        const prev = mergedPayload.length > 0 ? mergedPayload[mergedPayload.length - 1] : undefined;
+        const canMerge = prev !== undefined
+            && cur.role === prev.role
             && cur.role !== "tool"
             && !cur.toolCalls?.length
             && !prev.toolCalls?.length
             && typeof cur.content === "string"
             && typeof prev.content === "string";
         if (canMerge) {
-            prev.content = prev.content + "\n\n" + cur.content;
+            prev.content = (prev.content as string) + "\n\n" + cur.content;
             prev._debugMeta = {
                 ...prev._debugMeta,
                 marker: mergeMarkerText(prev._debugMeta?.marker, cur._debugMeta?.marker),
             };
-            finalPayload.splice(i, 1);
+        } else {
+            mergedPayload.push(cur);
         }
     }
 
-    return finalPayload;
+    return mergedPayload;
 }
 
 

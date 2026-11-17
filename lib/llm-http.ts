@@ -15,6 +15,10 @@ export function fetchLlmPayload(
     options: FetchLlmPayloadOptions = {},
 ): Promise<Response> {
     const bodyText = JSON.stringify(payload.body);
+    // 序列化完成后 body 已无任何用处：整段流式响应期间调用栈仍持有 request 引用，
+    // 若不在此解绑，几 MB 的 messages 数组会被钉在堆上直到流结束，
+    // 与流式渲染/GC 叠加时容易顶穿 iOS Jetsam。messagesForLog 单独保留，不受影响。
+    payload.body = {} as LlmRequestPayload["body"];
     if (payload.serverProxy) {
         return fetch("/api/llm-proxy", {
             method: "POST",

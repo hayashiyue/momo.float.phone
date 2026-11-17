@@ -176,8 +176,14 @@ export function ApiSettings() {
             } else {
                 throw new Error("返回数据格式不符合预期");
             }
-            setFetchedModels(prev => ({ ...prev, [config.id]: modelNames }));
-            setTestResult(prev => ({ ...prev, [config.id]: { success: true, message: `成功获取 ${modelNames.length} 个模型` } }));
+            // 去重 + 自然序：让 claude-* / gemini-* / gpt-* 同系列聚在一起，
+            // 且 gpt-4 / gpt-4o / gpt-5 按数字序而非字典序排列。只用默认 locale：
+            // 模型 ID 全为 ASCII，zh-CN 对 '-' '.' 的排序规则反而不符合预期。
+            const sortedModels = Array.from(new Set(modelNames)).sort((a, b) =>
+                a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
+            );
+            setFetchedModels(prev => ({ ...prev, [config.id]: sortedModels }));
+            setTestResult(prev => ({ ...prev, [config.id]: { success: true, message: `成功获取 ${sortedModels.length} 个模型` } }));
         } catch (error: unknown) {
             const msg = error instanceof Error ? error.message : String(error);
             setTestResult(prev => ({ ...prev, [config.id]: { success: false, message: `拉取失败: ${msg}` } }));
