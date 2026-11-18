@@ -386,26 +386,10 @@ function getPromptTags(p: Prompt): string[] | null {
 }
 
 // ── Helper: check if prompt is enabled (prompt_order overrides prompt.enabled) ──
-// assemblePromptPayload 会对每个预设条目调一次本函数，原实现每次都在 prompt_order
-// 里线性 find，条目数为 P 时就是 O(P²) 次字符串比较。这里按 prompt_order 数组引用
-// 缓存一份 identifier → enabled 映射，把查找降到 O(1)。
-// 预设编辑走的是「整体替换 preset 对象」路径（新数组），因此 WeakMap 会自然失效；
-// 附带长度校验，防御极小概率的原地增删。
-const _promptOrderEnabledMemo = new WeakMap<PromptOrderEntry[], Map<string, boolean>>();
-
-function getPromptOrderEnabledMap(promptOrder: PromptOrderEntry[]): Map<string, boolean> {
-    const cached = _promptOrderEnabledMemo.get(promptOrder);
-    if (cached && cached.size === promptOrder.length) return cached;
-    const map = new Map<string, boolean>();
-    for (const entry of promptOrder) map.set(entry.identifier, entry.enabled);
-    _promptOrderEnabledMemo.set(promptOrder, map);
-    return map;
-}
-
 function isPromptEnabled(prompt: Prompt, promptOrder?: PromptOrderEntry[]): boolean {
     if (promptOrder && promptOrder.length > 0) {
-        const enabled = getPromptOrderEnabledMap(promptOrder).get(prompt.identifier);
-        if (enabled !== undefined) return enabled;
+        const entry = promptOrder.find(e => e.identifier === prompt.identifier);
+        if (entry) return entry.enabled;
     }
     return prompt.enabled;
 }
@@ -426,45 +410,6 @@ function wrapXml(tag: string, content: string): string {
 // ── Helper: get content for a marker entry ──
 function applyWorldInfoRegex(text: string, regexGroups: RegexConfig[], ctx?: RegexContext): string {
     return applyRegex(text, regexGroups, 5, { isPrompt: true, ...ctx });
-}
-
-/** 这些 marker 的返回值已逐条展开过宏（见 joinWorldBookEntriesWithMacros），调用方不要重复 expand。 */
-const MACRO_ALREADY_EXPANDED_MARKERS = new Set(["worldInfoBefore", "worldInfoAfter"]);
-
-/**
- * 世界书条目的逐条宏展开 + 世界书正则 + 拼接。
- *
- * 关键点：必须在**每条**上单独跑 MacroEngine.expand，而不是 join 之后再跑整体。
- * 整体展开时，几百条世界书合起来哪怕只有一条含 {{char}}，includes("{{") 短路
- * 就会对整块几十万字失效，所有不含宏的条目也被迫跟着跑全文正则（还可能因为
- * 某条含无法识别的 {{xxx}} 而多跑一轮）。逐条展开后不含宏的条目直接原样返回。
- */
-function joinWorldBookEntriesWithMacros(
-    entries: WorldBookEntry[],
-    regexGroups: RegexConfig[] | undefined,
-    regexCtx?: RegexContext,
-): string | null {
-    if (entries.length === 0) return null;
-    const sorted = [...entries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
-    // 世界书正则（placement=5）与输入正则同属提示词阶段：先一次性筛出候选规则，
-    // 无候选时整批条目连一次正则循环都不用跑（绝大多数用户没配 placement=5 的 promptOnly 规则）。
-    const candidates = regexGroups
-        ? collectPromptRegexCandidates(regexGroups, 5, regexCtx?.activeTags ?? [])
-        : [];
-    const engine = regexCtx?.macroEngine;
-    const out: string[] = [];
-    for (const entry of sorted) {
-        let content = entry.content;
-        // 逐条展开宏：不含 "{{" 的条目由 MacroEngine 内部短路直接返回，零成本
-        if (engine && content.includes("{{")) {
-            content = postProcessTrim(engine.expand(content)).trim();
-        }
-        if (candidates.length > 0) {
-            content = applyPromptRegexCandidates(content, candidates, regexCtx ?? {});
-        }
-        if (content) out.push(content);
-    }
-    return out.length > 0 ? out.join("\n\n") : null;
 }
 
 function getMarkerContent(
@@ -488,16 +433,16 @@ function getMarkerContent(
             return character.personality?.trim() || null;
         case "personaDescription":
             return userPersonaText;
-        // worldInfoBefore / worldInfoAfter 逐条处理，**不能先 join 再整体展开**。
-        // 原因：MacroEngine.expand 的快速短路是 text.includes("{{")，一旦把几百条世界书
-        // 先拼成一整块几十万字的文本，只要其中一条含 {{char}}，短路就整体失效——
-        // 那些本来完全不含宏的条目也会被全文正则扫两遍。逐条展开后，
-        // 不含宏的条目 O(1) 直接返回，含单层宏的条目第二轮即 break。
-        // 处理完再 join，调用方（getMarkerContent 的调用处）因此无需再对整块做 expand。
-        case "worldInfoBefore":
-            return joinWorldBookEntriesWithMacros(wbBeforeEntries, regexGroups, regexCtx);
-        case "worldInfoAfter":
-            return joinWorldBookEntriesWithMacros(wbAfterEntries, regexGroups, regexCtx);
+        case "worldInfoBefore": {
+            if (wbBeforeEntries.length === 0) return null;
+            const sorted = [...wbBeforeEntries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
+            return sorted.map(e => regexGroups ? applyWorldInfoRegex(e.content, regexGroups, regexCtx) : e.content).join("\n\n");
+        }
+        case "worldInfoAfter": {
+            if (wbAfterEntries.length === 0) return null;
+            const sorted = [...wbAfterEntries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
+            return sorted.map(e => regexGroups ? applyWorldInfoRegex(e.content, regexGroups, regexCtx) : e.content).join("\n\n");
+        }
         case "calendarSchedule":
             return scheduleSummary?.trim() || null;
         case "memoryCore":
@@ -879,14 +824,7 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
             }
 
             // Expand macros in prompt content
-            // 不含 "{{" 的条目跳过 expand 与 postProcessTrim（两条全文正则路径），
-            // 预设条目动辄几十条，逐条省下来是可感知的。语义与原来完全一致。
-            let content = p.content;
-            if (content.includes("{{")) {
-                content = postProcessTrim(engine.expand(content)).trim();
-            } else {
-                content = content.trim();
-            }
+            let content = postProcessTrim(engine.expand(p.content)).trim();
             if (!content) continue;
 
             const role = normalizeRole(p.role);
@@ -943,18 +881,11 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
         });
 
         // World book at-depth entries (position=4) — injected at specific chat depth
-        // 与 worldInfoBefore/After 一致：世界书正则候选先筛一次，无候选时逐条直接跳过正则
-        const wbAtDepthRegexCandidates = collectPromptRegexCandidates(regexes, 5, activeTags);
         wbAtDepthEntries.forEach(entry => {
-            let content = entry.content;
-            if (content.includes("{{")) {
-                content = postProcessTrim(engine.expand(content)).trim();
-            } else {
-                content = content.trim();
-            }
+            let content = postProcessTrim(engine.expand(entry.content)).trim();
             if (!content) return;
-            if (wbAtDepthRegexCandidates.length > 0) {
-                content = applyPromptRegexCandidates(content, wbAtDepthRegexCandidates, { macroEngine: engine, activeTags });
+            if (regexes.length > 0) {
+                content = applyWorldInfoRegex(content, regexes, { macroEngine: engine, activeTags });
             }
             blocks.push({
                 text: content,
@@ -1148,16 +1079,13 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
     // --- Aggregate into final LLM messages ---
     // 走预设时只合并相邻的历史消息：预设条目本来就靠 role 交替表达结构，不能合。
     const finalPayload: LLMMessage[] = [];
-    // 输入正则在组装提示词时只有 promptOnly 规则会生效，且 disabled / placement / 标签
-    // 三项与具体 block 无关：先一次性筛好，避免每个 block 重复遍历全部规则组。
-    const inputRegexCandidates = collectPromptRegexCandidates(regexes, 1, activeTags);
     blocks.forEach(b => {
         const inputCtx: RegexContext = b.fromHistory
             ? { depth: b.depth, activeTags, history: true }
             : { activeTags };
         const processedText = b.role === "tool"
             ? b.text
-            : applyPromptRegexCandidates(b.text, inputRegexCandidates, inputCtx);
+            : applyInputRegex(b.text, regexes, inputCtx);
         const carriesNativeToolData = b.role === "tool" || Boolean(b.toolCalls?.length);
 
         const canMerge = preset
@@ -1211,13 +1139,10 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
     // --- Post-process: merge any remaining consecutive same-role messages ---
     // This catches cases where preset entries (non-history) end up adjacent to
     // history messages with the same role, which can cause API errors.
-    // 单趟正向构建：与「倒序逐项 splice」语义完全等价（都是后一条并入前一条、
-    // 保留前一条位置），但省掉了 n 次数组中间插入删除的元素搬移。
-    const mergedPayload: LLMMessage[] = [];
-    for (const cur of finalPayload) {
-        const prev = mergedPayload.length > 0 ? mergedPayload[mergedPayload.length - 1] : undefined;
-        const canMerge = prev !== undefined
-            && cur.role === prev.role
+    for (let i = finalPayload.length - 1; i > 0; i--) {
+        const cur = finalPayload[i];
+        const prev = finalPayload[i - 1];
+        const canMerge = cur.role === prev.role
             && cur.role !== "tool"
             && !cur.toolCalls?.length
             && !prev.toolCalls?.length
@@ -1229,12 +1154,11 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                 ...prev._debugMeta,
                 marker: mergeMarkerText(prev._debugMeta?.marker, cur._debugMeta?.marker),
             };
-        } else {
-            mergedPayload.push(cur);
+            finalPayload.splice(i, 1);
         }
     }
 
-    return mergedPayload;
+    return finalPayload;
 }
 
 
@@ -1408,70 +1332,22 @@ function resolveWorldBookDepth(entry: WorldBookEntry): number {
     return 995;
 }
 
-// ── 世界书激活的缓存层 ──────────────────────────────
-// 每轮生成都要对「所有世界书的所有条目」跑一次关键词激活判定。
-// 原实现对每条 entry 都重新做一次 key.split(",") + trim + toLowerCase，
-// 且对同一段 contextText 重复 toLowerCase() —— N 个条目就是 N 次全文小写化。
-// 下面三份缓存把与 entry / contextText 绑定的重复计算收敛到各一次。
-// 说明：entry 是持久化配置对象，通常长期引用稳定；如被整体替换（编辑世界书），
-// WeakMap 自然失效，不会读到脏数据。
-const _wbParsedKeysMemo = new WeakMap<WorldBookEntry, { rawKey: string; keys: string[]; lowerKeys: string[] }>();
-const _wbKeywordRegexCache = new Map<string, RegExp | null>();
-let _wbContextRaw = "";
-let _wbContextLower = "";
-
-function getWorldBookEntryKeys(entry: WorldBookEntry): { keys: string[]; lowerKeys: string[] } {
-    const rawKey = entry.key ?? "";
-    const cached = _wbParsedKeysMemo.get(entry);
-    if (cached && cached.rawKey === rawKey) return cached;
-    const keys = rawKey.split(",").map(k => k.trim()).filter(Boolean);
-    const lowerKeys = keys.map(k => k.toLowerCase());
-    const next = { rawKey, keys, lowerKeys };
-    _wbParsedKeysMemo.set(entry, next);
-    return next;
-}
-
-function getLowerContextText(contextText: string): string {
-    if (contextText === _wbContextRaw) return _wbContextLower;
-    _wbContextRaw = contextText;
-    _wbContextLower = contextText.toLowerCase();
-    return _wbContextLower;
-}
-
-function getWorldBookKeywordRegex(pattern: string): RegExp | null {
-    if (_wbKeywordRegexCache.has(pattern)) return _wbKeywordRegexCache.get(pattern)!;
-    let compiled: RegExp | null = null;
-    try {
-        compiled = new RegExp(pattern, "i");
-    } catch {
-        compiled = null;
-    }
-    // 有界缓存：世界书条目可能很多，但活跃的 key 模式数量有限
-    if (_wbKeywordRegexCache.size > 2000) _wbKeywordRegexCache.clear();
-    _wbKeywordRegexCache.set(pattern, compiled);
-    return compiled;
-}
-
 export function isWorldBookEntryActivated(entry: WorldBookEntry, contextText: string): boolean {
     if (entry.constant) return true;
 
     // Key string is usually comma separated
-    const { keys } = getWorldBookEntryKeys(entry);
+    const keys = entry.key.split(",").map(k => k.trim()).filter(Boolean);
     if (keys.length === 0) return false;
 
     let keyMatch = false;
     if (entry.use_regex) {
-        // 新编译的 RegExp（仅 "i" 标志，无 g/y）不携带 lastIndex 状态，
-        // 跨调用复用是安全的。
         keyMatch = keys.some(k => {
-            const regex = getWorldBookKeywordRegex(k);
-            return regex ? regex.test(contextText) : false;
+            const regex = new RegExp(k, "i");
+            return regex.test(contextText);
         });
     } else {
-        // 同一段 contextText 在本轮所有条目间共享，只需小写化一次
-        const lowerCtx = getLowerContextText(contextText);
-        const { lowerKeys } = getWorldBookEntryKeys(entry);
-        keyMatch = lowerKeys.some(k => lowerCtx.includes(k));
+        const lowerCtx = contextText.toLowerCase();
+        keyMatch = keys.some(k => lowerCtx.includes(k.toLowerCase()));
     }
 
     if (!keyMatch) return false;
@@ -1679,60 +1555,6 @@ function applyRegex(text: string, regexGroups: RegexConfig[], placement: number,
 
 function applyInputRegex(text: string, regexGroups: RegexConfig[], ctx?: RegexContext): string {
     return applyRegex(text, regexGroups, 1, { isPrompt: true, ...ctx });
-}
-
-/**
- * 提示词阶段正则的候选规则预筛（placement 1 = 输入，5 = 世界书）。
- *
- * applyInputRegex / applyWorldInfoRegex 都以 isPrompt=true、isMarkdown=false、
- * isEdit=false 调用。代进 shouldRunRule 的 fires 表达式：
- *   (md && isMarkdown) || (po && isPrompt) || (!md && !po && !isMarkdown && !isPrompt)
- * 前项恒为 false（isMarkdown=false），末项恒为 false（isPrompt=true），
- * 因此只有 promptOnly === true 的规则会在组装提示词时生效。
- *
- * 除此之外的 disabled / placement / 标签门控都与具体文本无关，可以在循环外
- * 一次性筛好；只有 historyOnly 与 minDepth/maxDepth 依赖单条内容的
- * fromHistory / depth，必须留在逐条判定里。
- */
-function collectPromptRegexCandidates(
-    regexGroups: RegexConfig[],
-    placement: number,
-    activeTags: string[],
-): import("./settings-types").RegexRule[] {
-    const rules: import("./settings-types").RegexRule[] = [];
-    for (const group of regexGroups) {
-        for (const rule of group.rules) {
-            if (rule.disabled) continue;
-            if (!rule.placement?.includes(placement)) continue;
-            if (!matchesActiveTags(rule.tags, activeTags)) continue;
-            if (rule.promptOnly !== true) continue;
-            rules.push(rule);
-        }
-    }
-    return rules;
-}
-
-/** 与 applyRegex（isPrompt 语义）一致，但只遍历已预筛的候选规则（逐条条件仍在循环内判定）。 */
-function applyPromptRegexCandidates(
-    text: string,
-    candidates: import("./settings-types").RegexRule[],
-    ctx: RegexContext,
-): string {
-    if (!text || candidates.length === 0) return text;
-    let result = text;
-    for (const rule of candidates) {
-        if (rule.historyOnly === true && ctx.history !== true) continue;
-        if (typeof ctx.depth === "number") {
-            if (rule.minDepth != null && rule.minDepth >= -1 && ctx.depth < rule.minDepth) continue;
-            if (rule.maxDepth != null && rule.maxDepth >= 0 && ctx.depth > rule.maxDepth) continue;
-        }
-        try {
-            result = runRegexRule(rule, result, ctx.macroEngine);
-        } catch {
-            // Ignore bad regex rules safely
-        }
-    }
-    return result;
 }
 
 /**
@@ -2440,15 +2262,13 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
 
     // Aggregate into final LLM messages
     const finalPayload: LLMMessage[] = [];
-    // 与单聊版本一致：输入正则的固定条件先一次性筛好，逐块只判 historyOnly / depth
-    const inputRegexCandidates = collectPromptRegexCandidates(regexes, 1, activeTags);
     blocks.forEach(b => {
         const inputCtx: RegexContext = b.fromHistory
             ? { depth: b.depth, activeTags, history: true }
             : { activeTags };
         const processedText = b.role === "tool"
             ? b.text
-            : applyPromptRegexCandidates(b.text, inputRegexCandidates, inputCtx);
+            : applyInputRegex(b.text, regexes, inputCtx);
         const carriesNativeToolData = b.role === "tool" || Boolean(b.toolCalls?.length);
 
         const canMerge = b.fromHistory && finalPayload.length > 0 &&
@@ -2494,12 +2314,10 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     });
 
     // --- Post-process: merge any remaining consecutive same-role messages ---
-    // 与单聊版一致：单趟正向构建，避免倒序 splice 的元素搬移。
-    const mergedPayload: LLMMessage[] = [];
-    for (const cur of finalPayload) {
-        const prev = mergedPayload.length > 0 ? mergedPayload[mergedPayload.length - 1] : undefined;
-        const canMerge = prev !== undefined
-            && cur.role === prev.role
+    for (let i = finalPayload.length - 1; i > 0; i--) {
+        const cur = finalPayload[i];
+        const prev = finalPayload[i - 1];
+        const canMerge = cur.role === prev.role
             && cur.role !== "tool"
             && !cur.toolCalls?.length
             && !prev.toolCalls?.length
@@ -2511,12 +2329,11 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 ...prev._debugMeta,
                 marker: mergeMarkerText(prev._debugMeta?.marker, cur._debugMeta?.marker),
             };
-        } else {
-            mergedPayload.push(cur);
+            finalPayload.splice(i, 1);
         }
     }
 
-    return mergedPayload;
+    return finalPayload;
 }
 
 
