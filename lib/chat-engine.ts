@@ -3,7 +3,7 @@
 import { createSseJsonParser } from "./sse-json";
 import { maybeAppendShortcutCapability } from "./offline-shortcut-capability";
 import { loadCharacters } from "./character-storage";
-import { beginGeneration, endGeneration } from "./generation-lock";
+
 import { buildScreenEffectPromptHint } from "./chat-screen-effects";
 import { emitChatPluginEvent, runChatPluginTransform } from "./chat-plugin-hooks";
 import { buildChatPluginPromptFragments } from "./chat-plugin-storage";
@@ -65,7 +65,7 @@ import { loadMemoryConfig, incrementEventCounter } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { maybeRunSummarization } from "./memory-summarizer";
-import { loadNativeTimelineAsync, prepareShortTermContext, resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { parseActionTags, dispatchActions } from "./action-parser";
 import { findEnabledToolForSchema, getEnabledTools, type EnabledTool } from "./tool-storage";
 import { formatToolsForPrompt, formatToolSchema } from "./tool-prompt";
@@ -2022,50 +2022,27 @@ export async function buildChatPromptMessages(
     const toolsEnabled = enabledTools.length > 0
         && (options?.forceEnableTools === true || presetIncludesToolsMacro(preset, resolvedAppId, effectiveAppTags));
     const usesNativeActions = Boolean(toolsEnabled && nativeToolProtocolForConfig(config));
-    // 自定义 APP 明确声明「不要聊天历史」时，无需扫描 14 类模块的时间线、也无需组装
-    // 短期记忆池：这些结果随后会被 assemblePromptPayload 整段丢弃（historyInjectionEnabled
-    // 为 false），却要先把该角色在聊天/朋友圈/剧情/日记/剧场/小红书/访谈/共创等模块里的
-    // 全部历史反序列化一遍。自定义 APP 本身还挂着 iframe 与整包资源，这段白做的全量扫描
-    // 就是「App 调模型时闪退」的直接推手。
-    const skipShortTermScan = promptProfile?.history === "none"
-        || Boolean(promptProfile?.exclude?.includes("shortTermMemory"));
-    const timeline = skipShortTermScan
-        ? []
-        : await loadNativeTimelineAsync(character.id, {
-            appId: resolvedAppId as import("./settings-types").ContentAppId,
-            userName: userIdentity?.name,
-            excludeOfflineSessionId: options?.excludeOfflineSessionId,
-            excludeChatSessionId: isOfflineMode ? undefined : session.id,
-            promptTimestampOptions,
-            maxMessagesPerSession: resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget),
-            allowedSources: memConfig.shortTermAllowedSources,
-            // 扫描是分片异步的，接上信号后用户点「停止」能在分片间立即中断，
-            // 不必等 14 类模块全部扫完。
-            signal: options?.signal,
-        });
-    // 时间线扫描后让出一帧，避免与后续短期记忆池排序及世界书正则堆在同一个长宏任务里卡死页面
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    const timeline = await loadNativeTimelineAsync(character.id, {
+        appId: resolvedAppId as import("./settings-types").ContentAppId,
+        userName: userIdentity?.name,
+        excludeOfflineSessionId: options?.excludeOfflineSessionId,
+        excludeChatSessionId: isOfflineMode ? undefined : session.id,
+        promptTimestampOptions,
+        allowedSources: memConfig.shortTermAllowedSources,
+        signal: options?.signal,
+    });
     throwIfAborted(options?.signal);
-    const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = skipShortTermScan
-        ? {
-            recentBlocks: [] as ReturnType<typeof prepareShortTermContext>["recentBlocks"],
-            truncatedHistory: historyForPrompt,
-            // 世界书关键词匹配仍需要一段上下文：用当前历史尾部，成本可忽略
-            wbActivationContext: historyForPrompt.slice(-10).map(m => m.content).join("\n"),
-            unifiedRecentItems: [] as ReturnType<typeof prepareShortTermContext>["unifiedRecentItems"],
-        }
-        : prepareShortTermContext(character.id, resolvedAppId, {
-            timeline,
-            history: historyForPrompt,
-            includeDirectChatEntries: isOfflineMode,
-            includeNativeToolHistory: usesNativeActions,
-            excludeOfflineSessionId: options?.excludeOfflineSessionId,
-            chatAccountId: session.chatAccountId || null,
-            excludeChatSessionId: isOfflineMode ? undefined : session.id,
-            userName: userIdentity?.name,
-            promptTimestampOptions,
-        });
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    const { recentBlocks, truncatedHistory, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(character.id, resolvedAppId, {
+        timeline,
+        history: historyForPrompt,
+        includeDirectChatEntries: isOfflineMode,
+        includeNativeToolHistory: usesNativeActions,
+        excludeOfflineSessionId: options?.excludeOfflineSessionId,
+        chatAccountId: session.chatAccountId || null,
+        excludeChatSessionId: isOfflineMode ? undefined : session.id,
+        userName: userIdentity?.name,
+        promptTimestampOptions,
+    });
     throwIfAborted(options?.signal);
     const promptHistory = applyVisionImagePromptLimit(
         truncatedHistory.map(msg => ({ ...msg })),
@@ -2115,8 +2092,6 @@ export async function buildChatPromptMessages(
         )
         : "";
 
-    // 进入全量世界书激活 + 输入正则替换前再让出一帧，防止点生成后主线程连续卡顿数秒
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
     throwIfAborted(options?.signal);
     const llmMessages = assemblePromptPayload({
         character,
@@ -2766,18 +2741,12 @@ export async function generateChatCompletion(
         shortcutCompleted: false,
         shortcutCancelled: false,
     };
-    // 全局生成锁：让后台任务（长期记忆总结、离线快照组装）在生成本身进行期间
-    // 主动退避。此前 generation-lock 只有调用方没有获取方，计数恒为 0，那道退避
-    // 一直是失效的——后台组装与前台生成撞在同一时间窗口，是「生成卡好几秒、
-    // 内存峰值翻倍闪退」的一条实际来源。
-    beginGeneration();
     try {
         return await generateChatCompletionCore(session, history, options, callbacks, bailoutRef);
     } catch (err) {
         if (options?.signal?.aborted) bailoutRef.shortcutCancelled = true;
         throw err;
     } finally {
-        endGeneration();
         bailoutRef.closed = true;
         bailoutRef.current?.settle();
         for (const handle of bailoutRef.shortcutHandles) {

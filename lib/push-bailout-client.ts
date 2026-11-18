@@ -4,7 +4,7 @@
 // buildChatPromptMessages → buildProviderRequest 链路，零新逻辑。
 
 import { bgSetInterval } from "./bg-timer";
-import { hasActiveGenerationLock } from "./generation-lock";
+
 import { buildChatPromptMessages } from "./chat-engine";
 import { buildProviderRequest, toLlmRequestMessages, type LlmRequestPayload } from "./llm-provider-adapter";
 import { loadChatMessages, loadChatSessions, loadFollowUpSchedule, type ChatMessage, type ChatSession } from "./chat-storage";
@@ -324,15 +324,6 @@ export async function armFollowUpBailout(
                         appId: "chat",
                         appTags: ["chat", "text", "followup"],
                         followUpCount: count,
-                        // 建单快照基准：回端消费时据此判定这份快照是否已过期。
-                        // 只比 armAt（=未来触发时刻）是不够的——用户在建单后到触发前
-                        // 回复过，本地早就往前走了，而旧快照仍停留在建单那一刻。
-                        // 用「最后一条 user 消息」而不是「最后一条消息」：离线期间
-                        // 云端连发的第 2、3 条会改变本地最后一条 assistant 消息，
-                        // 若拿它比对会把正常的连发消息全部误杀。用户自己发消息才是
-                        // 「本地往前走了」的唯一可靠信号。
-                        armedAt: new Date().toISOString(),
-                        snapshotLastUserMsgId: [...latestMessages].reverse().find(m => m.role === "user")?.id ?? "",
                     },
                 },
             }),
@@ -636,40 +627,17 @@ export async function armPeriodCareBailouts(): Promise<void> {
 
 let refreshingScheduled = false;
 
-// 每条规则挂单之间的间隔。每次挂单都要完整跑 buildChatPromptMessages
-// （14 模块时间线 + 全部世界书 + 预设 + 双份 buildProviderRequest + 最多
-// 800KB JSON 序列化）。启动 20 秒后一口气连续跑几条规则，会在用户正操作
-// 界面时把主线程连续占满——表现为「开机一会儿后连打字、滑动都卡」。
-const SCHEDULED_BAILOUT_GAP_MS = 2_500;
-
-function sleep(ms: number): Promise<void> {
-    return new Promise<void>(resolve => setTimeout(resolve, ms));
-}
-
 /** 刷新所有"已知触发时刻"的兜底快照（切后台/启动时调用，保证上下文最新）。 */
 export async function refreshScheduledBailouts(): Promise<void> {
     if (refreshingScheduled || !bailoutEnabled()) return;
     refreshingScheduled = true;
     try {
         for (const schedule of loadTimedWakeSchedules()) {
-            // 切后台立即中止：在 hidden 状态组装几十万字 Prompt 会直接撞 iOS 内存红线
-            if (typeof document !== "undefined" && document.hidden) return;
-            // 前台正在生成就退避，绝不与用户等待的这一轮抢主线程与内存
-            if (hasActiveGenerationLock()) {
-                await sleep(SCHEDULED_BAILOUT_GAP_MS);
-            }
             await armTimedWakeBailout(schedule);
-            await sleep(SCHEDULED_BAILOUT_GAP_MS);
         }
         for (const rule of loadIdleReconnectRules()) {
-            if (typeof document !== "undefined" && document.hidden) return;
-            if (hasActiveGenerationLock()) {
-                await sleep(SCHEDULED_BAILOUT_GAP_MS);
-            }
             await armIdleReconnectBailout(rule);
-            await sleep(SCHEDULED_BAILOUT_GAP_MS);
         }
-        if (typeof document !== "undefined" && document.hidden) return;
         await armPeriodCareBailouts();
     } finally {
         refreshingScheduled = false;

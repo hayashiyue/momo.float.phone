@@ -16,7 +16,7 @@ import { previewMessagesForApi, sendLLMRequest } from "./chat-engine";
 import { loadMemoryConfig } from "./memory-storage";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
-import { loadNativeTimelineAsync, prepareShortTermContext, resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import { buildCalendarScheduleMarker } from "./calendar-storage";
 import { getWeekStartIso } from "./calendar-utils";
 
@@ -64,11 +64,8 @@ async function buildDwellingMessages(
     // 都要在单帧里全量反序列化一遍，物品文本生成时尤其卡死/闪退。
     const timeline = await loadNativeTimelineAsync(characterId, {
         appId: "dwelling",
-        maxMessagesPerSession: resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget),
         allowedSources: memConfig.shortTermAllowedSources,
     });
-    // 扫描完成后让出一帧，避免把「短期池排序 + 世界书正则 + 提示词拼装」堆进同一个长宏任务。
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
     const { recentBlocks, wbActivationContext, unifiedRecentItems } = prepareShortTermContext(characterId, "dwelling", {
         userName: userIdentity?.name ?? "用户",
         history: [],

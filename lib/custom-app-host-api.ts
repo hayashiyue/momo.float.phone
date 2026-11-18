@@ -54,7 +54,7 @@ import { loadMemoryConfig, loadMemoryEntriesByType, saveMemoryEntry } from "./me
 import { formatCoreMemories, formatLongTermMemories } from "./memory-injector";
 import { retrieveCoreMemoriesForPrompt, retrieveMemoriesForPrompt } from "./memory-service";
 import type { MemoryEntry } from "./memory-types";
-import { loadNativeTimelineAsync, prepareShortTermContext, resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
+import { loadNativeTimelineAsync, prepareShortTermContext } from "./short-term-assembler";
 import {
   createWorldBook,
   createRegexGroup,
@@ -2455,10 +2455,8 @@ export async function readCustomAppShortTermMemory(app: InstalledCustomApp, reco
   // 会把 generator 的每个 yield 原地空转，在单帧内反序列化聊天/朋友圈/日记/剧场等
   // 十几类模块的全部数据，移动端直接内存爆炸闪退。
   const memConfig = loadMemoryConfig();
-  const maxMessagesPerSession = resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget);
   const timeline = await loadNativeTimelineAsync(characterId, {
     appId: `custom_app:${app.id}` as import("./settings-types").ContentAppId,
-    maxMessagesPerSession,
     allowedSources: memConfig.shortTermAllowedSources,
   });
   const context = prepareShortTermContext(characterId, `custom_app:${app.id}`, { history, timeline });

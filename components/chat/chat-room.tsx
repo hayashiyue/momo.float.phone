@@ -706,10 +706,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
 }, ref) {
     const [inputText, setInputText] = useState("");
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-    // 「停止」在 pointerdown 已经处理过时，吞掉随后那一次残留的 click。
-    // 发送与停止共用同一个按钮：pointerdown 里一旦把 isGenerating 置回 false，
-    // 抬手时 click 派发的 handleSubmit 就会走进「发送」分支，把输入框草稿误发出去。
-    const stopHandledRef = useRef(false);
+
     // 表情包搜索联想：ESC/失焦置 true 隐藏，输入变化重新开启
     const [suggestClosed, setSuggestClosed] = useState(false);
     // 围观群/被禁言：输入与富媒体入口全部锁定，只留线下切换和生成按钮
@@ -746,12 +743,6 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
     }), [appendText]);
 
     const handleSubmit = () => {
-        // pointerdown 已经执行过停止：这次 click 是同一根手指抬起的残留，直接吞掉，
-        // 绝不能落到下面的发送分支（会把输入框里的草稿误发出去）。
-        if (stopHandledRef.current) {
-            stopHandledRef.current = false;
-            return;
-        }
         if (inputLocked) return;
         if (isGenerating) {
             onStopGeneration();
@@ -893,19 +884,7 @@ const ChatTextInputBar = memo(forwardRef<ChatTextInputHandle, {
                 </button>
                 <button
                     onClick={handleSubmit}
-                    // 生成中让「停止」在手指触屏的第一帧就生效：流式期间列表持续重绘、
-                    // 滚动跟随也在动，移动端 click 需要等抬手且期间不能有重排抖动，
-                    // 极易被合成器吞掉——用户体感就是「点了暂停没反应」。
-                    onPointerDown={e => {
-                        if (!isGenerating) {
-                            // 普通发送按下：确保上次残留的拦截标记不会误吞这一次点击
-                            stopHandledRef.current = false;
-                            return;
-                        }
-                        stopHandledRef.current = true;
-                        e.preventDefault();
-                        onStopGeneration();
-                    }}
+
                     disabled={!isGenerating && (inputLocked || !inputText.trim())}
                     style={inputLocked && !isGenerating ? { opacity: 0.35 } : undefined}
                     className="ui-bare-btn text-[var(--c-text)]"

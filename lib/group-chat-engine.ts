@@ -38,7 +38,6 @@ import {
     type ChatCompletionCallbacks,
     type NativeChatToolBundle,
 } from "./chat-engine";
-import { resolveShortTermMaxMessagesPerSession } from "./short-term-assembler";
 import type { CustomAppPromptProfile } from "./custom-app-types";
 import { isNeteaseConfigured } from "./music-service";
 import { buildCalendarScheduleMarker, getCurrentCalendarScheduleForPrompt } from "./calendar-storage";
@@ -83,7 +82,6 @@ import { parseOfflineResponse, extractThinkingTag, type ParsedOfflineResponse } 
 import { buildProviderRequest, nativeToolProtocolForConfig, toLlmRequestMessages, type LlmRequestMessage, type LlmToolCall } from "./llm-provider-adapter";
 import type { DebugPromptSnapshot } from "./debug-store";
 import { throwIfAborted } from "./abort-utils";
-import { beginGeneration, endGeneration } from "./generation-lock";
 import { buildCharacterTimeContext, buildGroupTimeContext } from "./character-time";
 import { getPromptTimestampOptionsForTimeContext } from "./prompt-time";
 
@@ -403,7 +401,7 @@ async function buildGroupChatPromptMessages(
 
     const enabledTools = options?.disableTools ? [] : getEnabledTools("group_chat");
     const usesNativeActions = Boolean(nativeToolProtocolForConfig(config) && enabledTools.length > 0);
-    const groupMaxHistoryWindow = resolveShortTermMaxMessagesPerSession(memConfig.shortTermTokenBudget);
+    const groupMaxHistoryWindow = 120;
     const windowedGroupHistory = history.length > groupMaxHistoryWindow ? history.slice(-groupMaxHistoryWindow) : history;
     const annotatedHistory = annotateGroupHistory(windowedGroupHistory, participantIds, userName);
     const {
@@ -821,21 +819,6 @@ async function runNativeGroupToolLoop(params: {
  * All characters' data is assembled into one prompt, AI responds as all characters.
  */
 export async function generateGroupChatCompletion(
-    session: ChatSession,
-    history: ChatMessage[],
-    callbacks?: ChatCompletionCallbacks,
-    options?: GroupChatPromptBuildOptions & { signal?: AbortSignal; skipMemorySummarization?: boolean },
-): Promise<{ characterId: string; characterName: string; responseText: string }[]> {
-    // 全局生成锁：让后台任务（长期记忆总结、离线快照组装）在群聊生成期间退避
-    beginGeneration();
-    try {
-        return await generateGroupChatCompletionInner(session, history, callbacks, options);
-    } finally {
-        endGeneration();
-    }
-}
-
-async function generateGroupChatCompletionInner(
     session: ChatSession,
     history: ChatMessage[],
     callbacks?: ChatCompletionCallbacks,
