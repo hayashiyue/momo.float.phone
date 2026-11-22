@@ -12,6 +12,9 @@ import {
     toggleApiGroupCollapsed,
     deleteApiGroupAndRelease,
     moveApiConfigToGroup,
+    loadApiSortMode,
+    saveApiSortMode,
+    type ApiSortMode,
 } from "@/lib/api-groups";
 import { useApiDrag } from "@/lib/use-api-drag";
 import { generateEmbedding, isEmbeddingModelName } from "@/lib/memory-embedding";
@@ -116,6 +119,18 @@ export function ApiSettings() {
         );
         return () => setSubpageRightAction("api", null);
     }, [addConfig, setSubpageRightAction]);
+
+    // 列表排序模式：按名称（数字/英文在前，中文在后）或按添加时间。
+    const [sortMode, setSortMode] = useState<ApiSortMode>(() => loadApiSortMode());
+    useEffect(() => {
+        const handler = () => setSortMode(loadApiSortMode());
+        window.addEventListener("api-sort-mode-changed", handler);
+        return () => window.removeEventListener("api-sort-mode-changed", handler);
+    }, []);
+    const toggleSortMode = useCallback(() => {
+        const next: ApiSortMode = loadApiSortMode() === "name" ? "time" : "name";
+        saveApiSortMode(next);
+    }, []);
 
     const updateConfig = (id: string, updates: Partial<ApiConfig>) => {
         persist(configs.map(c => c.id === id ? { ...c, ...updates } : c));
@@ -303,6 +318,14 @@ export function ApiSettings() {
         <div className="flex flex-col gap-4">
             <div className="api-group-toolbar">
                 <h2 className="m-0 mx-2 ts-28 font-bold italic leading-none text-black">API Settings</h2>
+                <button
+                    type="button"
+                    onClick={toggleSortMode}
+                    className="ui-btn ui-btn-outline rounded-[18px] h-9 px-3 text-xs font-semibold gap-1.5"
+                    title="切换列表排序方式"
+                >
+                    <span>{sortMode === "name" ? "排序：按名称" : "排序：按时间"}</span>
+                </button>
                 <button
                     type="button"
                     onClick={() => setFolderModal({ mode: "create", name: "" })}

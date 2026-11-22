@@ -789,16 +789,7 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                     input.dwellingContext,
                 );
                 if (markerContent) {
-                    // 世界书这两个 marker 在 joinWorldBookEntriesWithMacros 里已逐条展开过宏，
-                    // 再对拼好的整块跑一次 expand 会把几百条世界书当一个大字符串全文扫，
-                    // 正是「世界书多时点生成卡好几秒」的来源。其余 marker 照常展开。
-                    if (!MACRO_ALREADY_EXPANDED_MARKERS.has(p.identifier)) {
-                        // 人设/记忆/关系/日程等 marker 通常不含宏（尤其记忆与关系是系统生成的纯数据），
-                        // 加一层 includes 判断即可省掉对整块内容的宏正则与 trim 正则。
-                        if (markerContent.includes("{{")) {
-                            markerContent = postProcessTrim(engine.expand(markerContent)).trim();
-                        }
-                    }
+                    markerContent = postProcessTrim(engine.expand(markerContent)).trim();
                     if (markerContent) {
                         const xmlText = wrapXml(toXmlTag(p.identifier), markerContent);
                         if (afterChatHistory) {
@@ -1999,12 +1990,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
     }
     // 2.6 at-depth 世界书条目(独享+共享,均已去重):照单聊规则插入聊天历史对应深度
     for (const inj of atDepthInjections) {
-        let content = inj.entry.content;
-        if (content.includes("{{")) {
-            content = postProcessTrim(inj.engine.expand(content)).trim();
-        } else {
-            content = content.trim();
-        }
+        let content = postProcessTrim(inj.engine.expand(inj.entry.content)).trim();
         if (!content) continue;
         content = applyWorldInfoRegex(content, regexes, { macroEngine: inj.engine, activeTags });
         blocks.push({
@@ -2074,12 +2060,7 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 continue;
             }
 
-            let content = p.content;
-            if (content.includes("{{")) {
-                content = postProcessTrim(groupEngine.expand(content)).trim();
-            } else {
-                content = content.trim();
-            }
+            let content = postProcessTrim(groupEngine.expand(p.content)).trim();
             if (!content) continue;
 
             const role = normalizeRole(p.role);

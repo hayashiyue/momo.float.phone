@@ -20,24 +20,91 @@ export type GroupedApiView = {
 };
 
 /**
- * 纯展示用的按名称排序（不改存储顺序）。
+ * API 列表/文件夹的展示排序模式：
+ * - "name"：按名称自然排序（数字与英文在前，中文在后）
+ * - "time"：保持存储顺序（即添加时的先后顺序）
+ * 仅影响展示，saveApiConfigs / saveApiGroups 始终按原始数组顺序落库。
+ */
+export type ApiSortMode = "name" | "time";
+
+const API_SORT_MODE_KEY = "ai_phone_api_sort_mode_v1";
+
+let _sortModeCache: ApiSortMode | null = null;
+
+export function loadApiSortMode(): ApiSortMode {
+    if (_sortModeCache) return _sortModeCache;
+    try {
+        const raw = typeof window !== "undefined" ? localStorage.getItem(API_SORT_MODE_KEY) : null;
+        _sortModeCache = raw === "time" ? "time" : "name";
+    } catch {
+        _sortModeCache = "name";
+    }
+    return _sortModeCache;
+}
+
+export function saveApiSortMode(mode: ApiSortMode): void {
+    _sortModeCache = mode;
+    try {
+        if (typeof window !== "undefined") localStorage.setItem(API_SORT_MODE_KEY, mode);
+    } catch {
+        /* ignore quota / privacy mode */
+    }
+    if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("api-sort-mode-changed"));
+    }
+}
+
+/** 取首字符码点：ASCII（数字/英文字母/半角符号）优先于非 ASCII（中文等）。 */
+function isAsciiLead(text: string): boolean {
+    if (!text) return true;
+    return text.charCodeAt(0) <= 0x7f;
+}
+
+/**
+ * 名称比较：数字与英文（ASCII 开头）整体排在中文（非 ASCII 开头）之前，
+ * 各自组内用自然序（numeric: true 让 1 / 2 / 10 按数序而非字典序）。
+ * 不用 "zh-CN" 做全局 locale，否则中文会被排到英文前面。
+ */
+export function compareLabelAsciiFirst(a: string, b: string): number {
+    const left = (a || "").trim();
+    const right = (b || "").trim();
+    if (!left && !right) return 0;
+    if (!left) return 1;
+    if (!right) return -1;
+    const leftAscii = isAsciiLead(left);
+    const rightAscii = isAsciiLead(right);
+    if (leftAscii !== rightAscii) return leftAscii ? -1 : 1;
+    return left.localeCompare(right, leftAscii ? undefined : "zh-CN", {
+        numeric: true,
+        sensitivity: "base",
+    });
+}
+
+/**
+ * 纯展示用的排序（不改存储顺序）。
  * 只在下拉选择器 / 列表渲染时调用；saveApiConfigs 仍按原始数组顺序落库，
  * 因此拖拽排序、configs[0] 默认取值、文件夹归属全都不受影响。
- * numeric: true 让 1-xxx / 2-xxx / 10-xxx 按自然数序排列而非字典序。
  */
 export function sortApiConfigsByName(configs: ApiConfig[]): ApiConfig[] {
+    if (loadApiSortMode() === "time") return [...configs];
     return [...configs].sort((a, b) =>
-        (a.name || a.provider || "").localeCompare(b.name || b.provider || "", "zh-CN", {
-            numeric: true,
-            sensitivity: "base",
-        }),
+        compareLabelAsciiFirst(a.name || a.defaultModel || a.provider || "", b.name || b.defaultModel || b.provider || ""),
     );
+}
+
+/** 文件夹按名称排序（"time" 模式保持存储顺序）。 */
+export function sortApiGroupsByName(groups: ApiGroup[]): ApiGroup[] {
+    if (loadApiSortMode() === "time") return [...groups];
+    return [...groups].sort((a, b) => compareLabelAsciiFirst(a.name || "", b.name || ""));
 }
 
 /**
  * 按文件夹顺序分组；groupId 指向不存在文件夹的条目自动归入 ungrouped（防御孤儿引用）。
+ * 内部按 loadApiSortMode() 决定文件夹顺序与组内 API 顺序。
  */
 export function buildGroupedApiView(configs: ApiConfig[], groups: ApiGroup[]): GroupedApiView {
+    const sortMode = loadApiSortMode();
+    const sortedGroups = sortApiGroupsByName(groups);
     const groupMap = new Map<string, ApiConfig[]>();
     for (const g of groups) {
         groupMap.set(g.id, []);
@@ -50,11 +117,11 @@ export function buildGroupedApiView(configs: ApiConfig[], groups: ApiGroup[]): G
             ungrouped.push(cfg);
         }
     }
-    const sections: GroupedApiSection[] = groups.map(group => ({
+    const sections: GroupedApiSection[] = sortedGroups.map(group => ({
         group,
-        items: groupMap.get(group.id) || [],
+        items: sortMode === "time" ? (groupMap.get(group.id) || []) : sortApiConfigsByName(groupMap.get(group.id) || []),
     }));
-    return { sections, ungrouped };
+    return { sections, ungrouped: sortMode === "time" ? ungrouped : sortApiConfigsByName(ungrouped) };
 }
 
 export function createApiGroup(name: string, currentGroups?: ApiGroup[]): ApiGroup[] {

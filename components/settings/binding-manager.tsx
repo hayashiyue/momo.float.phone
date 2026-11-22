@@ -167,6 +167,15 @@ export function BindingManager() {
         return () => window.removeEventListener(CUSTOM_APPS_UPDATED_EVENT, handler);
     }, []);
 
+    // 排序模式切换后重载选项（与 API 设置页共用同一个持久化开关）。
+    // 依赖留空：reloadData 只调用稳定的 setState 与 load* 读取函数，无需重绑监听。
+    useEffect(() => {
+        const onSortModeChanged = () => reloadData();
+        window.addEventListener("api-sort-mode-changed", onSortModeChanged);
+        return () => window.removeEventListener("api-sort-mode-changed", onSortModeChanged);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     const getCustomAppByBindingId = (appId: string | null | undefined): InstalledCustomApp | null => {
         if (!appId?.startsWith(CUSTOM_APP_BINDING_PREFIX)) return null;
         const customAppId = appId.slice(CUSTOM_APP_BINDING_PREFIX.length);

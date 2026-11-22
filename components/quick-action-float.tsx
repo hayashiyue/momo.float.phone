@@ -25,7 +25,7 @@ import {
     saveImageGenerationSettings,
 } from "@/lib/settings-storage";
 import type { ApiConfig, ApiGroup, BindingConfig, BindingSlot, WorldBookConfig, ImageGenerationSettings } from "@/lib/settings-types";
-import { buildGroupedApiView, sortApiConfigsByName, toggleApiGroupCollapsed } from "@/lib/api-groups";
+import { buildGroupedApiView, sortApiConfigsByName, toggleApiGroupCollapsed, loadApiSortMode, saveApiSortMode, type ApiSortMode } from "@/lib/api-groups";
 import { applyImageGenerationBinding, getActiveImageGenerationBindingId, getImageGenerationBindingOptions } from "@/lib/image-generation-binding";
 import { fetchImageGenerationModels, fetchNovelAiModels, filterLikelyImageModels, generateImageFromConfiguredApi } from "@/lib/image-generation-service";
 import { NOVELAI_COMMON_MODELS } from "@/lib/novelai-image-config";
@@ -73,6 +73,8 @@ export function QuickActionFloat() {
     const [config, setConfig] = useState<BindingConfig>(EMPTY_BINDING_CONFIG);
     const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([]);
     const [apiGroups, setApiGroups] = useState<ApiGroup[]>([]);
+    // 排序模式：切换后需要触发重渲染，按钮文字与列表顺序才会即时更新
+    const [sortMode, setSortMode] = useState<ApiSortMode>(() => loadApiSortMode());
     const [worldBooks, setWorldBooks] = useState<WorldBookConfig[]>([]);
     const [characters, setCharacters] = useState<Character[]>([]);
     const [fetchedModels, setFetchedModels] = useState<Record<string, string[]>>({});
@@ -117,6 +119,16 @@ export function QuickActionFloat() {
             return nextCharacters[0]?.id || "";
         });
     }, []);
+
+    // 排序模式切换后重载列表（设置页与快捷面板共用同一个持久化开关）
+    useEffect(() => {
+        const onSortModeChanged = () => {
+            setSortMode(loadApiSortMode());
+            reloadData();
+        };
+        window.addEventListener("api-sort-mode-changed", onSortModeChanged);
+        return () => window.removeEventListener("api-sort-mode-changed", onSortModeChanged);
+    }, [reloadData]);
 
     useEffect(() => {
         const syncEnabled = (event?: Event) => {
@@ -702,6 +714,18 @@ export function QuickActionFloat() {
                         <section className="quick-action-section" data-disabled={characterDisabled ? "" : undefined}>
                             <div className="quick-action-section-heading">
                                 <span><Code2 size={16} />文字 API</span>
+                                <button
+                                    type="button"
+                                    className="ui-link-btn text-[11px]"
+                                    title="切换 API 列表排序方式"
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        saveApiSortMode(loadApiSortMode() === "name" ? "time" : "name");
+                                    }}
+                                >
+                                    {sortMode === "name" ? "按名称" : "按时间"}
+                                </button>
                                 {currentSlot.apiConfigId ? <small>{itemName(apiConfigs, currentSlot.apiConfigId)}</small> : <small>{scope === "global" ? "未设置" : "继承"}</small>}
                             </div>
                             <details>
