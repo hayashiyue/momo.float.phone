@@ -1,4 +1,4 @@
-const CACHE_VERSION = "ai-phone-pwa-v27";
+const CACHE_VERSION = "ai-phone-pwa-v29";
 const NAVIGATE_FETCH_TIMEOUT_MS = 1800;
 const ASSET_FETCH_TIMEOUT_MS = 8000;
 
@@ -22,7 +22,11 @@ const PRECACHE_URLS = [
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(STATIC_CACHE)
-      .then((cache) => Promise.allSettled(PRECACHE_URLS.map((url) => cache.add(url))))
+      // cache: "reload" 绕过浏览器 HTTP 磁盘缓存，确保预缓存的是本次部署的最新 HTML。
+      // 否则新 SW 装好后缓存桶里仍是上一版页面壳，表现为「Vercel 已部署但界面还是旧的」。
+      .then((cache) => Promise.allSettled(PRECACHE_URLS.map((url) =>
+        cache.add(new Request(url, { cache: "reload" }))
+      )))
       .then(() => self.skipWaiting())
   );
 });
@@ -30,16 +34,36 @@ self.addEventListener("install", (event) => {
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(
-        keys
-          .filter((key) => !key.startsWith(CACHE_VERSION))
-          .map((key) => caches.delete(key))
-      ))
+      .then((keys) => {
+        // 本次激活前是否存在旧版本的缓存桶：存在即说明这是一次版本升级
+        // （而非首次安装），下面要驱动已打开的窗口刷新一次。
+        const hadOldCaches = keys.some((key) => !key.startsWith(CACHE_VERSION));
+        return Promise.all(
+          keys
+            .filter((key) => !key.startsWith(CACHE_VERSION))
+            .map((key) => caches.delete(key))
+        ).then(() => hadOldCaches);
+      })
       // 刷新预缓存的 "/" 快照：它是离线导航的最终兜底，若停留在旧部署版本，
       // 引用的旧 hash CSS/JS 已 404，会渲染出无样式页面（文字堆在左上角）。
-      .then(() => caches.open(STATIC_CACHE))
-      .then((cache) => cache.add(new Request("/", { cache: "reload" })).catch(() => {}))
-      .then(() => self.clients.claim())
+      .then((hadOldCaches) => caches.open(STATIC_CACHE)
+        .then((cache) => cache.add(new Request("/", { cache: "reload" })).catch(() => {}))
+        .then(() => self.clients.claim())
+        .then(() => hadOldCaches)
+      )
+      // 必须在 SW 里驱动刷新：手机当前页面可能还跑着旧版 JS，
+      // 那些 JS 里没有 controllerchange / updatefound 监听，
+      // 只有由当前这份最新的 sw.js 主动 navigate 才能把旧壳换成新版。
+      .then((hadOldCaches) => {
+        if (!hadOldCaches) return;
+        return self.clients.matchAll({ type: "window" }).then((clients) => {
+          clients.forEach((client) => {
+            if ("navigate" in client) {
+              client.navigate(client.url).catch(() => {});
+            }
+          });
+        });
+      })
   );
 });
 
