@@ -141,6 +141,8 @@ function uiRole(msg: ChatMessage): string {
 }
 
 function isChatRoomElementVisible(element: HTMLElement | null): boolean {
+    // 页面在后台时它一定不可见，直接短路，省掉下面那次 getComputedStyle 强制重排。
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
     if (!element || !element.isConnected) return false;
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return false;
@@ -3490,7 +3492,9 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                         onStreamDelta: (delta) => {
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
-                            if (!isChatRoomElementVisible(wrapperRef.current)) return;
+                            // 可见性校验挪到节流门槛之后：isChatRoomElementVisible 内有
+                            // getComputedStyle，会让每个 SSE 碎片都强制整页同步重排。
+                            // rAF 回调内部本来就有同名校验，这里不必重复。
                             // 群聊全文解析较重：rAF 合并 + 最小间隔双重限频（与单聊一致）。
                             // 只靠 rAF 时相当于 60fps 每帧都对整段累积文本重跑
                             // parseGroupChatResponse + cleanStreamText，主线程会被占满。
@@ -3542,7 +3546,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                         onStreamDelta: (delta) => {
                             if (!isCurrentGeneration()) return;
                             streamAccumRef.current += delta;
-                            if (!isChatRoomElementVisible(wrapperRef.current)) return;
+                            // 可见性校验挪到节流门槛之后：isChatRoomElementVisible 内有
+                            // getComputedStyle，会让每个 SSE 碎片都强制整页同步重排。
                             // 与 triggerAIResponse 的单聊分支保持一致：rAF 合并 + 最小间隔双重限频。
                             // 这里此前只做了 rAF 合并、漏了 120ms 门槛，等于每个动画帧都对全部累积
                             // 文本重跑一遍 cleanStreamText（十余条正则）并整棵树重渲染——主线程被占满，
@@ -3862,7 +3867,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                     onStreamDelta: (delta) => {
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
-                        if (!isChatRoomElementVisible(wrapperRef.current)) return;
+                        // 可见性校验挪到节流门槛之后（详见上方说明）：避免每个 SSE 碎片
+                        // 都触发一次 getComputedStyle 强制同步重排。
                         // 群聊全文解析更重：rAF 合并 + 最小间隔双重限频（与单聊一致）
                         if (streamParseFrameRef.current) return;
                         if (Date.now() - streamPreviewRenderedAtRef.current < STREAM_PREVIEW_MIN_INTERVAL_MS) return;
@@ -4039,7 +4045,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                     onStreamDelta: (delta) => {
                         if (!isCurrentGeneration()) return;
                         streamAccumRef.current += delta;
-                        if (!isChatRoomElementVisible(wrapperRef.current)) return;
+                        // 可见性校验挪到节流门槛之后（详见上方说明）：避免每个 SSE 碎片
+                        // 都触发一次 getComputedStyle 强制同步重排。
                         // 双重限频：rAF 合并同帧增量，再用 STREAM_PREVIEW_MIN_INTERVAL_MS 丢掉过密的帧。
                         // 被丢掉的增量不会丢内容——它已经累加进 streamAccumRef，下一帧一起渲染。
                         if (streamParseFrameRef.current) return;
@@ -4614,7 +4621,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 const onOfflineDelta = (delta: string) => {
                     if (!isCurrentOfflineRun()) return;
                     offlineStreamAccumRef.current += delta;
-                    if (!isChatRoomElementVisible(wrapperRef.current)) return;
+                    // 可见性校验挪到节流门槛之后（详见上方说明）：避免每个碎片
+                    // 都触发一次 getComputedStyle 强制同步重排。rAF 回调内已有同名校验。
                     // 线下预览解析合并到 rAF 下一帧：每帧最多一次全文解析+setState
                     if (offlineStreamFrameRef.current) return;
                     offlineStreamFrameRef.current = window.requestAnimationFrame(() => {
@@ -4765,7 +4773,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
             const onOfflineDelta = (delta: string) => {
                 if (!isCurrentOfflineRun()) return;
                 offlineStreamAccumRef.current += delta;
-                if (!isChatRoomElementVisible(wrapperRef.current)) return;
+                // 可见性校验挪到节流门槛之后（详见上方说明）：避免每个碎片
+                // 都触发一次 getComputedStyle 强制同步重排。rAF 回调内已有同名校验。
                 // 线下预览解析合并到 rAF 下一帧：每帧最多一次全文解析+setState（与首次发送路径对齐）
                 if (offlineStreamFrameRef.current) return;
                 offlineStreamFrameRef.current = window.requestAnimationFrame(() => {

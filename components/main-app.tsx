@@ -222,13 +222,6 @@ function preloadImageDataUrl(url: string): Promise<void> {
 // 资产读取本身不再设超时（超时放行空 assets 正是「进主页闪初始白底」的根因）。
 const WALLPAPER_DECODE_TIMEOUT_MS = 240;
 
-// 首屏主题资产读取的硬兜底。getThemeAssetMap 内部是 IndexedDB 请求 Promise，
-// 只挂 onsuccess / onerror，没有任何超时出口；iOS 从后台恢复或整页重载的瞬间，
-// WebKit 跨进程 IndexedDB 连接可能挂起不回调，这个 await 就永远不返回 →
-// setHydrated(true) 永不执行 → 开屏「进入主页」箭头永不出现（页面停在开屏）。
-// 正常情况几十毫秒就返回，2.5 秒只会在真正卡死时兜底放行。
-const THEME_PRELOAD_TIMEOUT_MS = 2_500;
-
 async function prepareDesktopThemeForFirstPaint(): Promise<PreparedDesktopTheme> {
   const profile = readThemeProfile();
   const assetIds = collectFirstPaintThemeAssetIds(profile);
@@ -282,18 +275,14 @@ export function MainApp() {
       // 现在资产读取（不含耗时的壁纸解码）只花几十毫秒，作为进入的前置条件感知不到，
       // 但能让首帧就是正确主题。
       try {
-        // 硬兜底：getThemeAssetMap 内部是只挂 onsuccess/onerror 的 IndexedDB 请求，
-        // 没有任何超时出口。iOS 从后台恢复或整页重载的瞬间连接可能挂起不回调，
-        // 这个 await 就永不返回，setHydrated(true) 永不执行，开屏「进入主页」箭头
-        // 永远不出——页面卡死在开屏。「重载后箭头没有了」就是这个。
-        // 正常启动几十毫秒返回，超时分支返回 null 直接放行，不牺牲正确性：
-        // DesktopShell 会在挂载后通过 initialThemeAssets 的增量 effect 补齐资产。
-        const nextPreparedTheme = await Promise.race([
-          prepareDesktopThemeForFirstPaint(),
-          new Promise<null>((resolve) => window.setTimeout(() => resolve(null), THEME_PRELOAD_TIMEOUT_MS)),
-        ]);
+        // 铁律第 8 条：严禁超时放行空 assets。资产读取必须完整拿到再放行，
+        // 否则 DesktopShell 首帧拿到 {}，壁纸取不到就渲染白底 + 默认初始图标，
+        // 等异步回调到了再"啪"一下替换成真实主题（用户看到的"闪一下"）。
+        // 这里不对它设超时——超时放行空 assets 的代价（每次启动必闪白底）
+        // 比偶发的开屏偏慢更糟。
+        const nextPreparedTheme = await prepareDesktopThemeForFirstPaint();
         if (cancelled) return;
-        if (nextPreparedTheme) setPreparedDesktopTheme(nextPreparedTheme);
+        setPreparedDesktopTheme(nextPreparedTheme);
       } catch (error) {
         console.warn("[MainApp] desktop theme preload failed:", error);
       }

@@ -1405,7 +1405,9 @@ function ImageBubble({
         const latestHasUserRef = hasUserReferenceImage(characterId, "chat");
         retryChatGeneratedImage(msg, characterId, nextDescription, latestHasRef ? useReferenceDraft : undefined, latestHasUserRef ? useUserReferenceDraft : false)
             .then(async (updated) => {
-                if (updated?.mediaUrl) {
+                // media-store:// 引用不能直接塞给 img.src，预解码会失败并污染控制台；
+                // 详情图由 ImageBubble 自己的 loadMediaObjectUrl effect 负责解析。
+                if (updated?.mediaUrl && !isMediaStoreRef(updated.mediaUrl)) {
                     try {
                         const img = new Image();
                         img.src = updated.mediaUrl;
@@ -2152,7 +2154,9 @@ function MediaFileBubble({
         const latestHasUserRef = hasUserReferenceImage(characterId, "chat");
         retryChatGeneratedImage(msg, characterId, nextDescription, latestHasRef ? imageUseReferenceDraft : undefined, latestHasUserRef ? imageUseUserReferenceDraft : false)
             .then(async (updated) => {
-                if (updated?.mediaUrl) {
+                // 同 ImageBubble：media-store:// 引用交给 MediaFileBubble 的
+                // loadMediaObjectUrl effect 解析，不能直接塞给 img.src。
+                if (updated?.mediaUrl && !isMediaStoreRef(updated.mediaUrl)) {
                     try {
                         const img = new Image();
                         img.src = updated.mediaUrl;

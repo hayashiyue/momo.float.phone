@@ -752,9 +752,19 @@ function getStableMessageOrder(msg: ChatMessage): number | null {
     return typeof msg.order === "number" && Number.isFinite(msg.order) ? msg.order : null;
 }
 
+// createdAt 是 ISO 字符串，new Date() 解析不便宜。compareChatMessages 每次比较要
+// 解析两次，displayMessages 每次 messages 变化都全量 sort（约 2n·log₂n 次解析），
+// 生成期间每落一条气泡就重跑一遍。用 WeakMap 按对象缓存，且比对原始字符串引用——
+// 消息对象被替换（新的 createdAt）时自动未命中，对象被回收时缓存条目一并释放。
+const _messageTimeValueCache = new WeakMap<object, { raw: string; time: number }>();
+
 function getMessageTimeValue(msg: Pick<ChatMessage, "createdAt">): number {
+    const cached = _messageTimeValueCache.get(msg);
+    if (cached && cached.raw === msg.createdAt) return cached.time;
     const value = new Date(msg.createdAt).getTime();
-    return Number.isFinite(value) ? value : 0;
+    const time = Number.isFinite(value) ? value : 0;
+    _messageTimeValueCache.set(msg, { raw: msg.createdAt, time });
+    return time;
 }
 
 export function compareChatMessages(a: ChatMessage, b: ChatMessage): number {

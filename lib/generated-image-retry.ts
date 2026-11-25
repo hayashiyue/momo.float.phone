@@ -133,7 +133,11 @@ export async function generateAndApplyChatGeneratedImage(
         const updated = updateChatMessage(message.id, {
             content: fileName,
             mediaType: "media_file",
-            mediaUrl: generated.dataUrl,
+            // 优先落轻量引用：完整 base64 会随 ChatMessage 一起被 chat-db 启动时
+            // 全量 toArray 常驻 JS 堆，一张几 MB，几张就是几十上百 MB 的死亡线。
+            // media-store:// 引用由 ImageBubble / MediaFileBubble 的
+            // isMediaStoreRef + loadMediaObjectUrl 解析并在卸载时 revokeObjectURL。
+            mediaUrl: generated.mediaRef || generated.dataUrl,
             mediaData: nextData,
         });
         if (!updated) throw new Error("原消息不存在，无法替换图片");

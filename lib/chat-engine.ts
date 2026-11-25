@@ -2804,46 +2804,59 @@ async function generateChatCompletionCore(
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
             // 本兜底的唯一用途是「用户离开页面后仍能收到回复」。
             //
-            // 前台这里只登记一个单次 15 秒定时器，不克隆、不序列化：
-            // 普通回复几秒内就结束，定时器会被 finally 里的 cancelPending 立刻撤掉，
-            // 全程零额外开销；只有超过 15 秒的慢生成才真正走到下面去挂单。
+            // 按铁律第 11 条：进入生成就立即挂一次性空壳 visibilitychange 监听，
+            // 前台零克隆、零序列化，切到后台那一瞬间再构建上传。
             //
-            // 绝不能改回 v30 的「立刻挂 visibilitychange 监听 + 1.5 秒巡检」：
-            // 那样一来用户一划走切后台，回调在毫秒级触发，正好撞在 iOS 已把后台
-            // 内存配额压到最低的瞬间，同步克隆整份 llmMessages 并 JSON.stringify
-            // 出数百 KB 请求体上传，直接被 Jetsam 杀进程重载——现象就是
-            // 「生成中挂后台，切回来整页重新加载」。同时那个闭包会一直钉住
-            // 原始 llmMessages，与流式缓冲、工具轮次请求体三份同时驻留。
-            const REPLY_BAILOUT_DELAY_MS = 15_000;
-            const waited = await new Promise<boolean>(resolve => {
+            // 三个必须守住的边界：
+            // ① 绝不死等 15 秒才挂监听——那会让前 15 秒的切后台彻底丢兜底；
+            // ② 绝不加 setInterval 巡检——v30 的 1.5 秒轮询在生成与多轮工具调用
+            //    期间持续抢主线程，是「不卡—卡—不卡」的周期卡顿来源；
+            // ③ 前台完成必须能瞬间摘掉监听——由 finally 里的 cancelPending 负责，
+            //    否则闭包会把 llmMessages / regexes / preset 钉到本轮之后。
+            // 页面本来就不可见（后台唤醒后跑到这里）时不注册监听，直接走一次性判断：
+            // 那种情况下没有"切后台"这个时机可等，挂上去只会永远不触发。
+            const pageWasVisible = typeof document === "undefined" || document.visibilityState === "visible";
+            const shouldArm = await new Promise<boolean>(resolve => {
                 let settled = false;
-                let timer: ReturnType<typeof setTimeout> | null = null;
+                let listenerAttached = false;
                 const settle = (value: boolean) => {
                     if (settled) return;
                     settled = true;
-                    if (timer !== null) { clearTimeout(timer); timer = null; }
+                    if (listenerAttached && typeof document !== "undefined") {
+                        document.removeEventListener("visibilitychange", onVisibility);
+                        listenerAttached = false;
+                    }
                     if (bailoutRef.cancelPending === cancel) bailoutRef.cancelPending = undefined;
                     options?.signal?.removeEventListener("abort", onAbort);
                     resolve(value);
                 };
                 const cancel = () => settle(false);
                 const onAbort = () => settle(false);
+                const onVisibility = () => {
+                    if (typeof document !== "undefined" && document.visibilityState === "hidden") settle(true);
+                };
                 if (options?.signal?.aborted) {
                     resolve(false);
                     return;
                 }
                 options?.signal?.addEventListener("abort", onAbort, { once: true });
+                // 前台：登记取消出口，然后挂一次性空壳监听，什么都不算。
                 bailoutRef.cancelPending = cancel;
-                timer = setTimeout(() => settle(true), REPLY_BAILOUT_DELAY_MS);
+                if (pageWasVisible && typeof document !== "undefined") {
+                    document.addEventListener("visibilitychange", onVisibility);
+                    listenerAttached = true;
+                    return;
+                }
+                // 已经是后台：没有"切后台"这个时机可等，直接放行走下面的一次性挂单。
+                settle(true);
             });
-            if (!waited) return;
+            if (!shouldArm) return;
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
-            // 定时器到点时页面已经不可见：说明页面在后台被唤醒后跑的这段，
-            // 此刻做克隆与序列化同样会撞内存红线，本次挂单直接放弃。
-            if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
             if (!(await mod.canArmReplyBailout())) return;
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
-            await new Promise<void>(r => setTimeout(r, 0));
+            // 这里刻意不再让出一帧：本段只在「页面刚切到后台」这一刻执行，
+            // iOS 对后台页面的 setTimeout 会节流甚至冻结，让帧反而可能让
+            // 挂单永远发不出去——离线兜底就是给这一刻用的，必须直上。
             const bailoutMessages = llmMessages.map(m => (
                 Array.isArray(m.content)
                     ? { ...m, content: m.content.map(p => p.type === "text" ? p.text : "[图片]").filter(Boolean).join("\n") }
