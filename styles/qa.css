@@ -68,7 +68,9 @@
   flex-direction: column;
   background: var(--qa-bg-canvas);
   transition: transform 0.34s cubic-bezier(0.32, 0.72, 0, 1), border-radius 0.34s ease, box-shadow 0.34s ease;
-  will-change: transform;
+  /* 移除常驻 will-change: transform：它把整个工坊永久提升成一个 GPU 合成层，
+     而层内顶部又叠着 6 个 backdrop-filter，合成器开销直接翻倍。
+     抽屉滑开时浏览器会自动为过渡提升层，不需要常驻声明。 */
 }
 .qa-stage.is-pushed {
   transform: translateX(-73%);   /* 内容左移，露出右侧列表；左侧多留一点内容 */
@@ -110,8 +112,10 @@
   inset: 0 0 -30px 0;
   z-index: -1;
   pointer-events: none;
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
+  /* 去掉实时模糊：原本这里铺满全宽、还向下多探 30px 再叠 mask 渐变，
+     是工坊顶栏 GPU 开销最大的一层。上方的注释本来就写的是「非毛玻璃」，
+     此处按原设计意图改成同色不透明底 + 底缘 mask 渐隐，视觉几乎不变而零模糊采样。 */
+  background: var(--qa-bg-canvas, #fafaf7);
   -webkit-mask-image: linear-gradient(180deg, #000 0%, rgba(0, 0, 0, 0.82) 48%, transparent 100%);
   mask-image: linear-gradient(180deg, #000 0%, rgba(0, 0, 0, 0.82) 48%, transparent 100%);
 }
@@ -135,9 +139,8 @@
   gap: 0;
   padding: 4px 16px 5px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.55);
-  -webkit-backdrop-filter: blur(16px) saturate(1.5);
-  backdrop-filter: blur(16px) saturate(1.5);
+  /* 名字胶囊不再做实时模糊，底色提到接近不透明 */
+  background: rgba(255, 255, 255, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.65);
   box-shadow: 0 2px 10px rgba(40, 34, 20, 0.07), inset 0 1px 1px rgba(255, 255, 255, 0.8);
 }
@@ -165,9 +168,9 @@
   border-radius: 9999px;
   color: var(--qa-text-primary);
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.7);
-  -webkit-backdrop-filter: blur(16px) saturate(1.5);
-  backdrop-filter: blur(16px) saturate(1.5);
+  /* 顶栏四个圆钮（返回 / 调用记录 / 清理工具 / 对话记录）不再各自做实时模糊：
+     四个按钮就是四层独立模糊采样区，叠在全宽 ::before 之上是 GPU 纹理的主要来源 */
+  background: rgba(255, 255, 255, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.75);
   box-shadow:
     0 2px 8px rgba(40, 34, 20, 0.08),
@@ -244,7 +247,9 @@
 .qa-thinking {
   color: var(--qa-text-tertiary);
   font-size: 14px;
-  animation: qa-shimmer 1.6s ease-in-out infinite;
+  /* 去掉无限闪烁：这个动画在生成期间持续跑，会逼着上方所有 backdrop-filter 层
+     每帧重新采样。翻页、滚动、流式吐字时它都在动，等于把主线程和 GPU 一起拖住。
+     保留静态灰字，正在生成这件事由流式光标与内容变化本身已经足够表达。 */
 }
 
 /* 工具调用：折叠单行摘要 + 点开展开（Claude Code 风） */
@@ -345,7 +350,9 @@
   vertical-align: -2px;
   background: var(--qa-accent);
   border-radius: 1px;
-  animation: qa-shimmer 1s ease-in-out infinite;
+  /* 去掉 1s 无限闪烁：这是生成期间唯一高频、持续可见的动画源，
+     每帧都在逼上方模糊层重采样，也是「生成时顶栏变磨砂」的直接驱动之一。 */
+  opacity: 0.75;
 }
 
 .qa-msg-note {

@@ -298,7 +298,9 @@
   display: flex;
   flex-direction: row;
   width: 100%;
-  will-change: transform;
+  /* 移除常驻 will-change: transform。这层包着整个桌面图标网格，
+     常驻声明等于让 WebKit 永久为整页宽度维护一张 GPU 纹理，
+     与 App 页面里的模糊层抢显存。翻页拖拽时由 .phone-swipe-dragging 接管。 */
   /* Single source of truth: --swipe-page (React) = current page; --swipe-drag
      (set imperatively while the finger is down) = live offset. */
   transform: translate3d(calc(-100% * var(--swipe-page, 0) + var(--swipe-drag, 0px)), 0, 0);
@@ -308,6 +310,8 @@
 /* While dragging we want 1:1 finger tracking, so suppress the settle transition. */
 .phone-swipe-layer.phone-swipe-dragging {
   transition: none;
+  /* 只在真正跟手拖拽翻页时才提升合成层，松手即释放 */
+  will-change: transform;
 }
 
 /* ── Icon grid ── */
