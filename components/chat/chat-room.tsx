@@ -2524,7 +2524,6 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
             reasoningAttached = true;
             return roundReasoning;
         };
-        const imageReplacementTasks: Promise<unknown>[] = [];
         const currentStateByCharacter = new Map<string, StateValue[]>();
         const getCurrentStateForCharacter = (characterId: string): StateValue[] => {
             const cached = currentStateByCharacter.get(characterId);
@@ -2685,7 +2684,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 }, guard);
                 throwIfGenerationStopped(guard);
                 const msg = pushChatMessage(draft);
-                imageReplacementTasks.push(scheduleGeneratedImageReplacement(msg, r.characterId, guard));
+                // 不收集不等待：生图仍带 guard.signal，点停止会中断本轮全部生图。
+                void scheduleGeneratedImageReplacement(msg, r.characterId, guard);
                 if (attachHere) attachedState = true;
                 savedAnyPart = true;
                 msgsSetter(prev => [...prev, msg]);
@@ -2726,10 +2726,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 currentStateByCharacter.set(r.characterId, stateValues);
             }
         }
-        if (imageReplacementTasks.length > 0) {
-            await Promise.allSettled(imageReplacementTasks);
-            throwIfGenerationStopped(guard);
-        }
+        // 图片气泡自带 pending 状态且生成完会自行更新，这里刻意不等待：
+        // 等待会让 isGenerating 一直挂到全部图片画完，输入框被锁死几十秒。
     };
 
     // AI auto-play: search & play a song by title/artist when AI recommends music
@@ -3120,7 +3118,6 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
 
         // Build rich-media drafts first, then publish them in the same order as the UI display.
         const messageDrafts: Array<{ draft: AssistantMessageDraft; afterPublish?: (message: ChatMessage) => Promise<unknown> | void }> = [];
-        const imageReplacementTasks: Promise<unknown>[] = [];
         // 面板挂到第一条能显示它的消息上；全是拍一拍等系统样式时补空消息驮面板
         let metaIdx = filteredParts.findIndex(canCarryFoldedPanel);
         if (metaIdx === -1 && (statusPanel || innerMonologue || stateValues.length > 0)) {
@@ -3206,8 +3203,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
             if (body) {
                 sendBrowserNotification(charN, { body: body.slice(0, 60), icon: effectiveCharacterAvatar || undefined });
             }
-            const afterPublishResult = entry.afterPublish?.(msg);
-            if (afterPublishResult) imageReplacementTasks.push(Promise.resolve(afterPublishResult));
+            void entry.afterPublish?.(msg);
             return msg;
         };
 
@@ -3231,10 +3227,10 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 publishVisibleMessage(messageDrafts[i]);
             }
         }
-        if (imageReplacementTasks.length > 0) {
-            await Promise.allSettled(imageReplacementTasks);
-            throwIfGenerationStopped(options);
-        }
+        // 图片气泡自带 pending 转圈、画完会自行更新，这里刻意不等待：
+        // 一等待 isGenerating 就要挂到全部图片画完，输入框被锁几十秒发不出下一条。
+        // 生图仍带 options.signal（点停止会中断本轮全部生图）；
+        // 想单独取消某张，点该气泡右上角的小叉号。
         if (forcedStory.description) void launchForcedOfflineStory(forcedStory.description);
         return { hasVisible: true, stateValues, triggerCall, hasDecline };
     };
@@ -3859,7 +3855,6 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                 }];
             }
             if (session.isGroup) {
-                const streamedImageReplacementTasks: Promise<unknown>[] = [];
                 // 每轮 LLM 调用的思维链：中间轮挂到该轮首条气泡，最终轮传给 processGroupParts
                 let pendingGroupReasoning: string | undefined;
                 const results = await generateGroupChatCompletion(session, latestMessages, {
@@ -3934,7 +3929,8 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                             }, generationGuard);
                             throwIfGenerationStopped(generationGuard);
                             const msg = pushChatMessage(draft);
-                            streamedImageReplacementTasks.push(scheduleGeneratedImageReplacement(msg, senderInfo.characterId, generationGuard));
+                            // 同上：不收集不等待，生图仍带 guard.signal 可随停止中断。
+                            void scheduleGeneratedImageReplacement(msg, senderInfo.characterId, generationGuard);
                             attachedState = true;
                             savedAnyPart = true;
                             setMessages(prev => [...prev, msg]);
@@ -4028,10 +4024,7 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                     appTags: theaterMode ? ["group_chat"] : undefined,
                 });
                 if (!isCurrentGeneration()) return;
-                if (streamedImageReplacementTasks.length > 0) {
-                    await Promise.allSettled(streamedImageReplacementTasks);
-                    throwIfGenerationStopped(generationGuard);
-                }
+                // 同单聊：不等待生图，避免锁住输入框。
                 await processGroupParts(results, setMessages, generationGuard, pendingGroupReasoning, { instantReveal: isSessionStreamingEnabled(session, true) });
             } else {
                 let lastSendResult: Awaited<ReturnType<typeof splitAndSaveAIMessages>> | undefined;

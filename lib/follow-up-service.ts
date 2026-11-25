@@ -284,13 +284,32 @@ export async function requestBackgroundChatReply(sessionId: string): Promise<{ o
     }
 }
 
+const idleReconnectArmTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * 防抖重挂冷场重连单：连续对话期间不断重置计时器，一次组装都不跑；
+ * 真正停手 8 秒后才补挂一次，保证云端快照仍是最新上下文。
+ */
+function scheduleIdleReconnectArm(sessionId: string, rule: Parameters<typeof armIdleReconnectBailout>[0]): void {
+    const existing = idleReconnectArmTimers.get(sessionId);
+    if (existing !== undefined) clearTimeout(existing);
+    idleReconnectArmTimers.set(sessionId, setTimeout(() => {
+        idleReconnectArmTimers.delete(sessionId);
+        if (typeof document !== "undefined" && document.hidden) return;
+        void armIdleReconnectBailout(rule);
+    }, 8_000));
+}
+
 /** Cancel any pending follow-up for a session (called when user sends a message). */
 export function cancelFollowUp(sessionId: string) {
     clearFollowUpSchedule(sessionId);
     cancelFollowUpBailout(sessionId);
-    // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约
+    // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约。
+    // 这里必须防抖——armIdleReconnectBailout 内部要完整组装一次提示词快照
+    // （扫模块 + 世界书 + 序列化），而 cancelFollowUp 每次发消息都会调用。
+    // 连续对话时若每次都跑，点发送的同一秒就有后台全量组装抢主线程。
     const idleRule = resetIdleReconnectForSession(sessionId);
-    if (idleRule) void armIdleReconnectBailout({ ...idleRule, consecutiveCount: 0 });
+    if (idleRule) scheduleIdleReconnectArm(sessionId, { ...idleRule, consecutiveCount: 0 });
     // If an API call is already in-flight, mark it for cancellation
     if (firingSet.has(sessionId)) {
         cancelledWhileFiring.add(sessionId);

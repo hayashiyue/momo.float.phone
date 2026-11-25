@@ -21,8 +21,8 @@ import remarkGfm from "remark-gfm";
 import remarkCjkFriendly from "remark-cjk-friendly";
 import remarkBreaks from "remark-breaks";
 import { createPortal } from "react-dom";
-import { Blocks, Maximize2, ReceiptText } from "lucide-react";
-import { retryChatGeneratedImage } from "@/lib/generated-image-retry";
+import { Blocks, Maximize2, ReceiptText, X } from "lucide-react";
+import { cancelChatGeneratedImage, retryChatGeneratedImage } from "@/lib/generated-image-retry";
 import { hasCharacterReferenceImage, hasUserReferenceImage } from "@/lib/image-generation-service";
 import { GeneratedImageErrorDialog } from "./generated-image-error-dialog";
 import { ScanPayCard } from "@/components/chat/scan-pay-card";
@@ -1485,7 +1485,7 @@ function ImageBubble({
     }
     if (isPending) {
         return (
-            <div className="chat-photo-card chat-photo-card--pending w-[180px] aspect-square rounded-none">
+            <div className="chat-photo-card chat-photo-card--pending w-[180px] aspect-square rounded-none relative">
                 <div className="chat-photo-card-pending-inner">
                     <div className="chat-photo-card-loader" aria-hidden="true">
                         <span className="chat-photo-card-loader-orbit" />
@@ -1493,6 +1493,19 @@ function ImageBubble({
                     </div>
                     <div className="chat-photo-card-pending-text">图片接收中...</div>
                 </div>
+                {/* 单独叫停这一张图：聊天室不再等待生图，停止按钮只负责文本流，
+                    这里给一个自己的取消入口，否则图会一直画下去无法中断。 */}
+                <button
+                    type="button"
+                    className="chat-photo-card-cancel absolute top-1.5 right-1.5 z-[2] w-6 h-6 flex items-center justify-center rounded-full bg-black/45 text-white/90"
+                    aria-label="取消生成这张图片"
+                    onClick={e => {
+                        e.stopPropagation();
+                        cancelChatGeneratedImage(msg.id);
+                    }}
+                >
+                    <X size={13} strokeWidth={2.6} />
+                </button>
             </div>
         );
     }

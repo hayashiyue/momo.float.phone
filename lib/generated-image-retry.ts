@@ -37,6 +37,23 @@ export function isPendingChatGeneratedImageMessage(message: Pick<ChatMessage, "m
     return message.mediaType === "image" && message.mediaData?.imageGenerationStatus === "pending";
 }
 
+/**
+ * 正在生成中的图片任务：messageId → 控制器。
+ *
+ * 聊天室不再 await 生图（否则图片没画完输入框就被锁住），
+ * 「停止」按钮已不是生图的唯一出口。用户要单独叫停某张图时，
+ * 由图片气泡右上角的小叉号调用 cancelChatGeneratedImage 中断。
+ */
+const activeImageGenerations = new Map<string, AbortController>();
+
+export function cancelChatGeneratedImage(messageId: string): boolean {
+    const controller = activeImageGenerations.get(messageId);
+    if (!controller) return false;
+    controller.abort();
+    activeImageGenerations.delete(messageId);
+    return true;
+}
+
 export async function generateAndApplyChatGeneratedImage(
     message: ChatMessage,
     characterId?: string,
@@ -76,6 +93,17 @@ export async function generateAndApplyChatGeneratedImage(
         if (marked) dispatchChatMessagesUpdated(marked.sessionId, marked);
     }
 
+    // 合并「本轮生成的 signal」与「这张图自己的控制器」：
+    // 点聊天室停止按钮会中断本轮全部生图，点图片上的叉号只中断这一张。
+    const localController = new AbortController();
+    const externalSignal = options?.signal;
+    const onExternalAbort = () => localController.abort();
+    if (externalSignal) {
+        if (externalSignal.aborted) localController.abort();
+        else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    activeImageGenerations.set(message.id, localController);
+
     try {
         const generated = await generateImageFromConfiguredApi({
             description,
@@ -83,7 +111,7 @@ export async function generateAndApplyChatGeneratedImage(
             appId: "chat",
             useReferenceImage: effectiveUseReference,
             includeUserReferenceImage: effectiveUseUserReference ? undefined : false,
-            signal: options?.signal,
+            signal: localController.signal,
         });
         if (!generated) throw new Error("生图配置未启用或不完整");
 
@@ -112,18 +140,27 @@ export async function generateAndApplyChatGeneratedImage(
         dispatchChatMessagesUpdated(updated.sessionId, updated);
         return updated;
     } catch (error) {
+        // 用户主动取消：不写成 failed（否则气泡弹红字），静默结束。
+        const aborted = localController.signal.aborted;
         const failed = updateChatMessage(message.id, {
             mediaData: {
                 ...message.mediaData,
                 label: description,
                 useReferenceImage: effectiveUseReference,
                 useUserReferenceImage: effectiveUseUserReference,
-                imageGenerationStatus: "failed",
-                imageGenerationError: errorToMessage(error),
+                imageGenerationStatus: aborted ? undefined : "failed",
+                imageGenerationError: aborted ? undefined : errorToMessage(error),
             },
         });
         if (failed) dispatchChatMessagesUpdated(failed.sessionId, failed);
+        // 返回已写库的新对象：旧 message 还带 pending，onUpdate 会把「生成中」覆盖回界面。
+        if (aborted) return failed ?? message;
         throw error;
+    } finally {
+        if (activeImageGenerations.get(message.id) === localController) {
+            activeImageGenerations.delete(message.id);
+        }
+        externalSignal?.removeEventListener("abort", onExternalAbort);
     }
 }
 

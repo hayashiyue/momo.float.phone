@@ -647,10 +647,10 @@ export async function refreshScheduledBailouts(): Promise<void> {
 /** 安装刷新钩子：仅在启动后空闲时执行，严禁在切后台(document.hidden)瞬间全量构建多个角色的完整 Prompt 快照（否则必触发 iOS 后台内存红线被系统 Jetsam 强杀重启）。 */
 export function installScheduledBailoutRefresher(): void {
     if (typeof window === "undefined") return;
-    window.setTimeout(() => {
-        if (typeof document !== "undefined" && document.hidden) return;
-        void refreshScheduledBailouts();
-    }, 20_000);
+    // 刻意不在启动后无条件全量重刷：每条 arm 都要完整组装一次提示词快照，
+    // 打开小手机 20 秒后集中跑一遍，正好撞上用户开始操作界面，
+    // 表现为「开着开着突然卡几秒」，也白烧云端请求额度。
+    // 预约单在创建/修改时（见下方 timed-wake-schedules-updated 监听）已同步过。
     let timedRefreshTimer: number | null = null;
     window.addEventListener("timed-wake-schedules-updated", () => {
         if (timedRefreshTimer !== null) window.clearTimeout(timedRefreshTimer);

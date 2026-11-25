@@ -2795,10 +2795,10 @@ async function generateChatCompletionCore(
         // 静默丢掉离线回复——为了第二轮续跑赔掉第一轮，不划算。冷场重连与定时
         // 唤醒是低频任务，那两条照常挂续跑。
         void import("./push-bailout-client").then(async mod => {
-            // 延后到 15 秒再挂云端兜底：非流式请求在前 6~10 秒正处于主请求刚序列化发出、
-            // JSC 尚未完成大对象回收的高峰期，过早克隆 llmMessages 并二次 buildProviderRequest
-            // 会让两份数百 KB 的请求体同时驻留内存，在 iOS WebKit 上直接触发 Jetsam 崩溃。
-            await new Promise(r => setTimeout(r, 15000));
+            // 不在开头死等 15 秒：点完生成立刻切去后台是常见场景，
+            // 那时监听器还没挂上、进程已被挂起，切回来这条回复就蒸发了。
+            // 改为立刻挂一次性 visibilitychange 监听：前台不克隆任何大对象，
+            // 只有真正切到后台那一刻才构建请求上传，内存开销与延迟挂载一致。
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
             // 本兜底的唯一用途是「用户离开页面后仍能收到回复」。用户还在前台看屏幕时
             // 提前克隆 llmMessages 并 buildProviderRequest（内部还要 JSON.stringify 一次）

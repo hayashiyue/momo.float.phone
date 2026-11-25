@@ -24,6 +24,7 @@ import { SettingsContext } from "../phone-settings-app";
 import { ICONS, type IconId } from "@/lib/desktop-config";
 import { IconGlyph } from "@/components/icon-glyph";
 import { CUSTOM_APPS_UPDATED_EVENT, loadInstalledCustomApps } from "@/lib/custom-app-storage";
+import { compareLabelAsciiFirst, loadApiSortMode } from "@/lib/api-groups";
 import { toCustomAppIconId } from "@/lib/custom-app-types";
 import type { InstalledCustomApp } from "@/lib/custom-app-types";
 
@@ -515,6 +516,12 @@ export function BindingManager() {
         }
     };
 
+    /** 纯展示排序：不动存储顺序，只让下拉选项与排序模式一致。 */
+    const sortOptions = (options: { id: string; name: string }[]): { id: string; name: string }[] => {
+        if (loadApiSortMode() === "time") return [...options];
+        return [...options].sort((a, b) => compareLabelAsciiFirst(a.name || "", b.name || ""));
+    };
+
     const getBindingFieldOptions = (field: BindingField): { id: string; name: string }[] => {
         switch (field) {
             case "apiConfigId":
@@ -522,15 +529,15 @@ export function BindingManager() {
             case "imageConfigId":
                 return imageSettings ? getImageGenerationBindingOptions(imageSettings) : [];
             case "voiceConfigId":
-                return voiceConfigs.map(c => ({ id: c.id, name: c.name || c.provider }));
+                return sortOptions(voiceConfigs.map(c => ({ id: c.id, name: c.name || c.provider })));
             case "presetId":
-                return presets.map(p => ({ id: p.id, name: p.name }));
+                return sortOptions(presets.map(p => ({ id: p.id, name: p.name })));
             case "userIdentityId":
-                return identities.map(i => ({ id: i.id, name: i.name }));
+                return sortOptions(identities.map(i => ({ id: i.id, name: i.name })));
             case "worldBookIds":
-                return worldBooks.map(w => ({ id: w.id, name: w.name }));
+                return sortOptions(worldBooks.map(w => ({ id: w.id, name: w.name })));
             case "regexIds":
-                return regexes.map(r => ({ id: r.id, name: r.name }));
+                return sortOptions(regexes.map(r => ({ id: r.id, name: r.name })));
         }
     };
 

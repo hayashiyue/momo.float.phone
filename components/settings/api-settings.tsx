@@ -321,10 +321,10 @@ export function ApiSettings() {
                 <button
                     type="button"
                     onClick={toggleSortMode}
-                    className="ui-btn ui-btn-outline rounded-[18px] h-9 px-3 text-xs font-semibold gap-1.5"
-                    title="切换列表排序方式"
+                    className="ui-btn ui-btn-outline rounded-[18px] h-9 px-2.5 text-xs font-semibold whitespace-nowrap shrink-0"
+                    title={sortMode === "name" ? "当前按名称排序，点击改为按时间" : "当前按时间排序，点击改为按名称"}
                 >
-                    <span>{sortMode === "name" ? "排序：按名称" : "排序：按时间"}</span>
+                    <span>{sortMode === "name" ? "按名称" : "按时间"}</span>
                 </button>
                 <button
                     type="button"

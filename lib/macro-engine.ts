@@ -104,9 +104,14 @@ export class MacroEngine {
 
     /** Main entry: iteratively expand all macros (innermost first). */
     expand(text: string): string {
+        // 绝大多数世界书条目、预设段落、历史消息根本不含宏。
+        // 直接返回可省掉整段全文正则替换（开销随文本长度线性增长，
+        // 生成一轮要对几十上百个块调用这里）。
+        if (!text || !text.includes("{{")) return text;
         const MAX_ITERATIONS = 50;
         let result = text;
         for (let i = 0; i < MAX_ITERATIONS; i++) {
+            if (!result.includes("{{")) break;
             const next = this.expandInnermost(result);
             if (next === result) break; // no more macros
             result = next;

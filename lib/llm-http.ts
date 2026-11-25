@@ -15,6 +15,9 @@ export function fetchLlmPayload(
     options: FetchLlmPayloadOptions = {},
 ): Promise<Response> {
     const bodyText = JSON.stringify(payload.body);
+    // 序列化完成后立即解绑：几 MB 的 messages 数组在整个流式期间再无用处，
+    // 不释放会与流式缓冲同时驻留，iOS WebKit 上容易顶 Jetsam 红线闪退。
+    payload.body = {} as LlmRequestPayload["body"];
     if (payload.serverProxy) {
         return fetch("/api/llm-proxy", {
             method: "POST",

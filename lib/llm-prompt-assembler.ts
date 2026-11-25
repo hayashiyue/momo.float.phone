@@ -412,6 +412,34 @@ function applyWorldInfoRegex(text: string, regexGroups: RegexConfig[], ctx?: Reg
     return applyRegex(text, regexGroups, 5, { isPrompt: true, ...ctx });
 }
 
+/**
+ * 世界书条目逐条处理后拼接。
+ *
+ * 先逐条展开宏再 join，而不是先 join 成大字符串再整体展开：
+ * 几百条世界书拼成几十万字后，只要其中一条含 {{char}}，整块都要跑全文正则，
+ * 那些根本不含宏的条目被迫陪跑；逐条处理后，不含 "{{" 的条目在 expand 入口
+ * 就被短路返回，零成本。
+ */
+function joinWorldBookEntries(
+    entries: WorldBookEntry[],
+    regexGroups: RegexConfig[] | undefined,
+    regexCtx: RegexContext | undefined,
+): string {
+    const engine = regexCtx?.macroEngine;
+    const out: string[] = [];
+    for (const entry of entries) {
+        let content = entry.content;
+        if (content.includes("{{") && engine) {
+            content = postProcessTrim(engine.expand(content)).trim();
+        }
+        if (regexGroups) {
+            content = applyWorldInfoRegex(content, regexGroups, regexCtx);
+        }
+        out.push(content);
+    }
+    return out.join("\n\n");
+}
+
 function getMarkerContent(
     identifier: string,
     character: Character,
@@ -436,12 +464,12 @@ function getMarkerContent(
         case "worldInfoBefore": {
             if (wbBeforeEntries.length === 0) return null;
             const sorted = [...wbBeforeEntries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
-            return sorted.map(e => regexGroups ? applyWorldInfoRegex(e.content, regexGroups, regexCtx) : e.content).join("\n\n");
+            return joinWorldBookEntries(sorted, regexGroups, regexCtx);
         }
         case "worldInfoAfter": {
             if (wbAfterEntries.length === 0) return null;
             const sorted = [...wbAfterEntries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
-            return sorted.map(e => regexGroups ? applyWorldInfoRegex(e.content, regexGroups, regexCtx) : e.content).join("\n\n");
+            return joinWorldBookEntries(sorted, regexGroups, regexCtx);
         }
         case "calendarSchedule":
             return scheduleSummary?.trim() || null;
@@ -789,7 +817,13 @@ export function assemblePromptPayload(input: AssemblerInput): LLMMessage[] {
                     input.dwellingContext,
                 );
                 if (markerContent) {
-                    markerContent = postProcessTrim(engine.expand(markerContent)).trim();
+                    // 这两个 marker 已在 joinWorldBookEntries 里逐条展开过，
+                    // 跳过对整块（可能几十万字）的二次全文正则扫描。
+                    if (p.identifier === "worldInfoBefore" || p.identifier === "worldInfoAfter") {
+                        markerContent = markerContent.trim();
+                    } else {
+                        markerContent = postProcessTrim(engine.expand(markerContent)).trim();
+                    }
                     if (markerContent) {
                         const xmlText = wrapXml(toXmlTag(p.identifier), markerContent);
                         if (afterChatHistory) {
