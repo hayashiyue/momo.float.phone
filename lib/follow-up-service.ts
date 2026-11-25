@@ -10,6 +10,7 @@ import {
     loadChatMessages,
     pushChatMessage,
     loadAllFollowUpSchedules,
+    loadFollowUpSchedule,
     saveFollowUpSchedule,
     clearFollowUpSchedule,
     updateMessageMediaStatus,
@@ -229,10 +230,38 @@ export function scheduleFollowUp(sessionId: string, count: number, stateValues?:
     const fireAt = Date.now() + delaySec * 1000;
     console.log(`[FollowUp] Anxiety-driven: value=${anxietyEntry.value}, delay=${delaySec}s, session=${sessionId}, count=${count}`);
     saveFollowUpSchedule({ sessionId, fireAt, count, delaySec });
-    // 离线推送兜底：把本轮追问的完整请求快照预约到服务端，App 被杀时由服务端接管。
-    // 用 bgSetTimeout 延后一拍执行，让出当前渲染帧——此处正是 AI 刚回复完、
-    // 界面正在收尾的时刻，立刻同步组装几十万字提示词会卡住收尾动画。
-    void armFollowUpBailout(sessionId, count, delaySec, fireAt);
+    scheduleFollowUpBailoutArm(sessionId, count, delaySec, fireAt);
+}
+
+// ── 追问兜底挂单的防抖 ─────────────────────────────────────
+// 这里原先写着「延后一拍执行，让出当前渲染帧」，但实际是同步 void 直调：
+// armFollowUpBailout 内部要跑完整 buildChatPromptMessages + 双份
+// buildProviderRequest（含 800KB 级 JSON 序列化），而调用点正是 AI 刚回复完、
+// 界面还在收尾动画的时刻——每条回复都白白重跑一次全量组装。
+// 现在改为 2.5 秒防抖：连续排期只保留最后一次；触发时页面隐藏或正在生成就放弃
+// （离线兜底本来就是给「App 被杀」用的，前台正在跑生成时挂单没有意义）。
+const followUpArmTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const FOLLOWUP_ARM_DEBOUNCE_MS = 2_500;
+
+function clearFollowUpArmTimer(sessionId: string): void {
+    const pending = followUpArmTimers.get(sessionId);
+    if (pending !== undefined) {
+        clearTimeout(pending);
+        followUpArmTimers.delete(sessionId);
+    }
+}
+
+function scheduleFollowUpBailoutArm(sessionId: string, count: number, delaySec: number, fireAt: number): void {
+    clearFollowUpArmTimer(sessionId);
+    followUpArmTimers.set(sessionId, setTimeout(() => {
+        followUpArmTimers.delete(sessionId);
+        if (typeof document !== "undefined" && document.hidden) return;
+        if (firingSet.has(sessionId) || backgroundGeneratingSessions.has(sessionId)) return;
+        // 防抖期间用户可能已经回复/取消排期，动手前确认这一轮排期还在
+        const latest = loadFollowUpSchedule(sessionId);
+        if (!latest || latest.count !== count || Math.abs(latest.fireAt - fireAt) > 1000) return;
+        void armFollowUpBailout(sessionId, count, delaySec, fireAt);
+    }, FOLLOWUP_ARM_DEBOUNCE_MS));
 }
 
 export async function requestBackgroundChatReply(sessionId: string): Promise<{ ok: boolean; skipped?: string }> {
@@ -288,7 +317,10 @@ const idleReconnectArmTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
  * 防抖重挂冷场重连单：连续对话期间不断重置计时器，一次组装都不跑；
- * 真正停手 8 秒后才补挂一次，保证云端快照仍是最新上下文。
+ * 真正停手 45 秒后才补挂一次，保证云端快照仍是最新上下文。
+ * （原为 8 秒——短于正常打字/思考间隔，几乎每句话都会到点触发一次全量
+ * 组装，正好撞在前台流式吐字与工具轮次上，表现为「不卡—卡—不卡」的周期
+ * 卡顿甚至闪退。冷场重连本来就是给「离开一段后才需要」用的，45 秒足够。）
  */
 function scheduleIdleReconnectArm(sessionId: string, rule: Parameters<typeof armIdleReconnectBailout>[0]): void {
     const existing = idleReconnectArmTimers.get(sessionId);
@@ -296,14 +328,21 @@ function scheduleIdleReconnectArm(sessionId: string, rule: Parameters<typeof arm
     idleReconnectArmTimers.set(sessionId, setTimeout(() => {
         idleReconnectArmTimers.delete(sessionId);
         if (typeof document !== "undefined" && document.hidden) return;
+        // 前台正在生成/追问期间绝不组装：armIdleReconnectBailout 内部要跑一遍完整
+        // buildChatPromptMessages + 双份 buildProviderRequest（含 800KB 级 JSON 序列化）。
+        // 防抖窗口若短于正常打字节奏（原为 8 秒），几乎每句话都会到点触发，
+        // 正好撞在流式吐字与工具轮次上，表现为「不卡—卡—不卡」的周期卡顿与闪退。
+        if (firingSet.has(sessionId) || backgroundGeneratingSessions.has(sessionId)) return;
         void armIdleReconnectBailout(rule);
-    }, 8_000));
+    }, 45_000));
 }
 
 /** Cancel any pending follow-up for a session (called when user sends a message). */
 export function cancelFollowUp(sessionId: string) {
     clearFollowUpSchedule(sessionId);
     cancelFollowUpBailout(sessionId);
+    // 撤掉还没到点的追问挂单：这条消息已经让上一轮排期作废，别让旧定时器再白跑一次组装
+    clearFollowUpArmTimer(sessionId);
     // 用户发了消息：冷场重连计数清零，按新周期重挂服务端预约。
     // 这里必须防抖——armIdleReconnectBailout 内部要完整组装一次提示词快照
     // （扫模块 + 世界书 + 序列化），而 cancelFollowUp 每次发消息都会调用。

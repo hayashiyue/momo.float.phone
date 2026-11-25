@@ -1,4 +1,4 @@
-const CACHE_VERSION = "ai-phone-pwa-v30";
+const CACHE_VERSION = "ai-phone-pwa-v31";
 const NAVIGATE_FETCH_TIMEOUT_MS = 1800;
 const ASSET_FETCH_TIMEOUT_MS = 8000;
 
@@ -32,39 +32,55 @@ self.addEventListener("install", (event) => {
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((keys) => {
-        // 本次激活前是否存在旧版本的缓存桶：存在即说明这是一次版本升级
-        // （而非首次安装），下面要驱动已打开的窗口刷新一次。
-        const hadOldCaches = keys.some((key) => !key.startsWith(CACHE_VERSION));
-        return Promise.all(
-          keys
-            .filter((key) => !key.startsWith(CACHE_VERSION))
-            .map((key) => caches.delete(key))
-        ).then(() => hadOldCaches);
-      })
-      // 刷新预缓存的 "/" 快照：它是离线导航的最终兜底，若停留在旧部署版本，
-      // 引用的旧 hash CSS/JS 已 404，会渲染出无样式页面（文字堆在左上角）。
-      .then((hadOldCaches) => caches.open(STATIC_CACHE)
-        .then((cache) => cache.add(new Request("/", { cache: "reload" })).catch(() => {}))
-        .then(() => self.clients.claim())
-        .then(() => hadOldCaches)
-      )
-      // 必须在 SW 里驱动刷新：手机当前页面可能还跑着旧版 JS，
-      // 那些 JS 里没有 controllerchange / updatefound 监听，
-      // 只有由当前这份最新的 sw.js 主动 navigate 才能把旧壳换成新版。
-      .then((hadOldCaches) => {
-        if (!hadOldCaches) return;
-        return self.clients.matchAll({ type: "window" }).then((clients) => {
-          clients.forEach((client) => {
-            if ("navigate" in client) {
-              client.navigate(client.url).catch(() => {});
-            }
-          });
-        });
-      })
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    const oldKeys = keys.filter((key) => !key.startsWith(CACHE_VERSION));
+
+    // ① 先把旧桶里现成的 "/" 快照抓出来做兜底种子。
+    //    顺序至关重要：v29/v30 是「先把旧桶全删光、再去拉新的 "/" 且失败被 catch 吞掉」，
+    //    一旦那一刻网络不通（弱网、切后台被冻结、平台刚好在发布），新桶没写进去、
+    //    旧桶已经删干净，之后冷启动 networkFirst 既没有缓存也没有网络，
+    //    根导航直接 throw —— 表现就是「重启手机后白屏」。
+    let seed = null;
+    for (const key of oldKeys) {
+      try {
+        const oldCache = await caches.open(key);
+        const hit = await oldCache.match("/", { ignoreSearch: true });
+        if (hit) { seed = hit; break; }
+      } catch (error) { /* 单个旧桶读失败不影响其它桶 */ }
+    }
+
+    // ② 确保当前版本的静态桶里确实存有 "/"，拿不到就用旧桶的种子补位。
+    const staticCache = await caches.open(STATIC_CACHE);
+    const alreadyCached = await staticCache.match("/", { ignoreSearch: true });
+    if (!alreadyCached) {
+      let stored = false;
+      try {
+        await staticCache.add(new Request("/", { cache: "reload" }));
+        stored = Boolean(await staticCache.match("/", { ignoreSearch: true }));
+      } catch (error) { stored = false; }
+      if (!stored && seed) {
+        try {
+          await staticCache.put("/", seed.clone());
+          stored = Boolean(await staticCache.match("/", { ignoreSearch: true }));
+        } catch (error) { stored = false; }
+      }
+      // 连种子都没有（首次安装且网络失败）：此时更不能删旧桶，留待下次激活重试。
+      if (!stored && oldKeys.length > 0) {
+        await self.clients.claim();
+        return;
+      }
+    }
+
+    // ③ 只有在当前版本的 "/" 确认可用之后，才清理旧版本缓存桶。
+    await Promise.all(oldKeys.map((key) => caches.delete(key).catch(() => false)));
+
+    // ④ 只做 claim，绝不在这里 client.navigate / reload。
+    //    components/pwa-registrar.tsx 已在新 SW activated 时刷新一次页面，
+    //    这里再 navigate 一遍等于同一毫秒级窗口内并发两条导航，
+    //    iOS WebKit 上会互相打断，表现为「切回来一直重新加载」。
+    await self.clients.claim();
+  })());
 });
 
 function isCacheableRequest(request) {

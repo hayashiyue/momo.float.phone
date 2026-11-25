@@ -67,8 +67,6 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
     consuming = true;
     lastConsumeAt = Date.now();
     const passStartMs = Date.now();
-    // 每轮消费重置会话基准：本轮期间合并进来的云端消息不能污染过期判定
-    preMergeSessionBaseline.clear();
     try {
         // 共享回传箱已停用，只读取用户自己的 Supabase。
         const sources: Array<"personal" | "shared"> = ["personal"];
@@ -87,12 +85,6 @@ export async function consumeServerOutbox(options?: { silent?: boolean; force?: 
             const consumedIds: string[] = [];
             for (const entry of entries) {
                 try {
-                    // 本地幂等：这条已经落过库了（上一轮 ack 失败导致服务端还留着），
-                    // 只补一次 ack，绝不再 parseAndSaveResponse 插一遍。
-                    if (consumedOutboxIdSet.has(entry.id)) {
-                        consumedIds.push(entry.id);
-                        continue;
-                    }
                     if (entry.trigger_key && handledTriggerKeys.has(entry.trigger_key)) {
                         consumedIds.push(entry.id);
                         continue;

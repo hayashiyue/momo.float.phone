@@ -511,9 +511,14 @@ export function installBridgeServerSync(): void {
     if (typeof window === "undefined") return;
     window.addEventListener("reality-bridge-rules-updated", () => scheduleSync(3_000));
     // 唯一聊天窗口一有新增/删除/外部合并就刷新基础快照，云端始终接着本地最新上下文。
-    window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, () => scheduleSync(3_000));
-    window.addEventListener(CHAT_MESSAGES_DELETED_EVENT, () => scheduleSync(3_000));
-    window.addEventListener("chat-messages-updated", () => scheduleSync(3_000));
-    // 严禁在 document.hidden 切后台瞬间立即跑 runSync 全量组装 Prompt 快照（切后台瞬间内存红线极低，跑重任务必被 iOS 强杀重启）；前台消息/规则变动已有 3s 防抖同步。
+    // 消息类变动不能跟 3 秒：runSync 会为每条「让TA回话」规则重建一次完整提示词快照
+    // （buildChatPromptMessages + 双份 buildProviderRequest + 800KB 级 JSON 序列化），
+    // 而且内容指纹比对排在全部快照组装之后——指纹命中只省网络、不省组装。
+    // 聊天热络时每句话都触发一次全量组装，正好撞在流式吐字与工具轮次上。
+    // 放宽到 25 秒（scheduleSync 本身是重置式防抖，热聊期间一次都不会真跑）。
+    window.addEventListener(CHAT_MESSAGE_PUSHED_EVENT, () => scheduleSync(25_000));
+    window.addEventListener(CHAT_MESSAGES_DELETED_EVENT, () => scheduleSync(25_000));
+    window.addEventListener("chat-messages-updated", () => scheduleSync(25_000));
+    // 严禁在 document.hidden 切后台瞬间立即跑 runSync 全量组装 Prompt 快照（切后台瞬间内存红线极低，跑重任务必被 iOS 强杀重启）；前台消息/规则变动已有防抖同步。
     scheduleSync(15_000);
 }

@@ -2683,6 +2683,8 @@ type ReplyBailoutRef = {
     shortcutHandles: ShortcutContinuationHandle[];
     shortcutCompleted: boolean;
     shortcutCancelled: boolean;
+    /** 撤掉还没到点的后台兜底定时器（生成结束时必须调，避免闭包被钉到本轮之后）。 */
+    cancelPending?: () => void;
 };
 
 async function registerShortcutContinuation(
@@ -2748,6 +2750,10 @@ export async function generateChatCompletion(
         throw err;
     } finally {
         bailoutRef.closed = true;
+        // 先撤掉还没到点的兜底定时器：不撤会把整份 llmMessages 闭包钉到本轮之后，
+        // 十几秒后才由定时器释放，期间与流式缓冲、下一轮请求体三份同时驻留。
+        bailoutRef.cancelPending?.();
+        bailoutRef.cancelPending = undefined;
         bailoutRef.current?.settle();
         for (const handle of bailoutRef.shortcutHandles) {
             if (bailoutRef.shortcutCompleted || bailoutRef.shortcutCancelled) handle.settle();
@@ -2795,42 +2801,46 @@ async function generateChatCompletionCore(
         // 静默丢掉离线回复——为了第二轮续跑赔掉第一轮，不划算。冷场重连与定时
         // 唤醒是低频任务，那两条照常挂续跑。
         void import("./push-bailout-client").then(async mod => {
-            // 不在开头死等 15 秒：点完生成立刻切去后台是常见场景，
-            // 那时监听器还没挂上、进程已被挂起，切回来这条回复就蒸发了。
-            // 改为立刻挂一次性 visibilitychange 监听：前台不克隆任何大对象，
-            // 只有真正切到后台那一刻才构建请求上传，内存开销与延迟挂载一致。
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
-            // 本兜底的唯一用途是「用户离开页面后仍能收到回复」。用户还在前台看屏幕时
-            // 提前克隆 llmMessages 并 buildProviderRequest（内部还要 JSON.stringify 一次）
-            // 会平白多出两份数百 KB 的请求体，在 iOS WebKit 上正是 Jetsam 与 GC 卡顿的来源。
-            // 所以前台不做事，只挂一次性监听，等真正切到后台那一刻再挂单。
-            if (typeof document !== "undefined" && document.visibilityState === "visible") {
-                const wentBackground = await new Promise<boolean>(resolve => {
-                    let settled = false;
-                    let timer: ReturnType<typeof setInterval> | null = null;
-                    const cleanup = () => {
-                        if (timer !== null) { clearInterval(timer); timer = null; }
-                        document.removeEventListener("visibilitychange", onVisibility);
-                    };
-                    const settle = (go: boolean) => {
-                        if (settled) return;
-                        settled = true;
-                        cleanup();
-                        resolve(go);
-                    };
-                    const onVisibility = () => {
-                        if (document.visibilityState === "hidden") settle(true);
-                    };
-                    document.addEventListener("visibilitychange", onVisibility);
-                    // 兜底巡检：本轮生成结束（closed/superseded/abort）时摘掉监听，
-                    // 避免监听器随每条回复累积。只查三个布尔量，不碰任何大对象。
-                    timer = setInterval(() => {
-                        if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) settle(false);
-                    }, 1500);
-                });
-                if (!wentBackground) return;
-            }
+            // 本兜底的唯一用途是「用户离开页面后仍能收到回复」。
+            //
+            // 前台这里只登记一个单次 15 秒定时器，不克隆、不序列化：
+            // 普通回复几秒内就结束，定时器会被 finally 里的 cancelPending 立刻撤掉，
+            // 全程零额外开销；只有超过 15 秒的慢生成才真正走到下面去挂单。
+            //
+            // 绝不能改回 v30 的「立刻挂 visibilitychange 监听 + 1.5 秒巡检」：
+            // 那样一来用户一划走切后台，回调在毫秒级触发，正好撞在 iOS 已把后台
+            // 内存配额压到最低的瞬间，同步克隆整份 llmMessages 并 JSON.stringify
+            // 出数百 KB 请求体上传，直接被 Jetsam 杀进程重载——现象就是
+            // 「生成中挂后台，切回来整页重新加载」。同时那个闭包会一直钉住
+            // 原始 llmMessages，与流式缓冲、工具轮次请求体三份同时驻留。
+            const REPLY_BAILOUT_DELAY_MS = 15_000;
+            const waited = await new Promise<boolean>(resolve => {
+                let settled = false;
+                let timer: ReturnType<typeof setTimeout> | null = null;
+                const settle = (value: boolean) => {
+                    if (settled) return;
+                    settled = true;
+                    if (timer !== null) { clearTimeout(timer); timer = null; }
+                    if (bailoutRef.cancelPending === cancel) bailoutRef.cancelPending = undefined;
+                    options?.signal?.removeEventListener("abort", onAbort);
+                    resolve(value);
+                };
+                const cancel = () => settle(false);
+                const onAbort = () => settle(false);
+                if (options?.signal?.aborted) {
+                    resolve(false);
+                    return;
+                }
+                options?.signal?.addEventListener("abort", onAbort, { once: true });
+                bailoutRef.cancelPending = cancel;
+                timer = setTimeout(() => settle(true), REPLY_BAILOUT_DELAY_MS);
+            });
+            if (!waited) return;
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
+            // 定时器到点时页面已经不可见：说明页面在后台被唤醒后跑的这段，
+            // 此刻做克隆与序列化同样会撞内存红线，本次挂单直接放弃。
+            if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
             if (!(await mod.canArmReplyBailout())) return;
             if (bailoutRef.closed || bailoutRef.superseded || options?.signal?.aborted) return;
             await new Promise<void>(r => setTimeout(r, 0));

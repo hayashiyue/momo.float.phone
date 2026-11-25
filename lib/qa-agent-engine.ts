@@ -71,6 +71,19 @@ export function formatQaErrorMessage(error: unknown): string {
     return String(error);
 }
 
+/** 工坊调用记录的正文上限：与聊天引擎的 LOG_MSG_MAX_CHARS 对齐。 */
+const QA_LOG_MSG_MAX_CHARS = 12_000;
+
+/**
+ * 写入调用记录前的消息正文截断。
+ * 工坊常贴几十万字符的源码/文档，整包进日志环会与请求体、流式缓冲同时驻留，
+ * 低内存设备上直接顶 Jetsam 红线。只留头尾，中间标明截断。
+ */
+function clipLogContent(content: string): string {
+    if (content.length <= QA_LOG_MSG_MAX_CHARS) return content;
+    return `${content.slice(0, 8_000)}\n...[日志已截断 ${content.length - 11_000} 字符以防内存溢出]...\n${content.slice(-3_000)}`;
+}
+
 function parseSseEvents(buffer: string): { events: string[]; rest: string } {
     const normalized = buffer.replace(/\r\n/g, "\n");
     const parts = normalized.split("\n\n");
@@ -364,7 +377,9 @@ async function requestQaCompletion(
             model: entry.model,
             messages: entry.messages.map(m => ({
                 role: m.role,
-                content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
+                // 截断：工坊常年贴几十万字符源码，整包进日志环会与请求体、流式缓冲
+                // 三份同时驻留，低内存设备直接顶 Jetsam。聊天引擎四条路径早就这么做了。
+                content: typeof m.content === "string" ? clipLogContent(m.content) : "[vision: 含图片的多模态消息]",
             })),
             rawResponse: entry.rawResponse,
             reasoning: entry.reasoning?.trim() || undefined,
@@ -773,7 +788,7 @@ async function callQaAgentNative(apiConfig: ApiConfig, history: QaEngineMessage[
                 model: apiConfig.defaultModel,
                 messages: fallbackRequest.messagesForLog.map(m => ({
                     role: m.role,
-                    content: typeof m.content === "string" ? m.content : "[vision: 含图片的多模态消息]",
+                    content: typeof m.content === "string" ? clipLogContent(m.content) : "[vision: 含图片的多模态消息]",
                 })),
                 rawResponse: JSON.stringify({ content: result.content, reasoning: result.reasoning, toolCalls: result.toolCalls }),
                 reasoning: parsed.reasoning?.trim() || undefined,

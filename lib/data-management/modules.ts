@@ -108,6 +108,16 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
           "ai_phone_idle_reconnect_rules_v1",
           "ai_phone_qa_feedback_v1",
           "ai_phone_qa_github_v1",
+          // 工坊（小坊）四项可调偏好：必须登记进正式模块。它们原先只写裸
+          // localStorage、又没有主模块归属，于是被「缓存与未分类数据」整类扫走
+          // （modules.ts 的 cache 模块 includeAll:true）——用户清理一次缓存、
+          // 或恢复一份不含缓存的备份，上下文预算就悄悄退回默认 1000000，
+          // 表现为「小坊上限总是自己变回去」。现在迁进 kv-db 并登记在此，
+          // 既受 IndexedDB 持久化保护，也会随设置模块正常备份/恢复。
+          "ai_phone_qa_context_budget_chars",
+          "ai_phone_qa_page_chars",
+          "ai_phone_qa_max_output_tokens",
+          "ai_phone_qa_max_rounds",
           "ai_phone_media_maintenance_config_v1",
         ],
       },

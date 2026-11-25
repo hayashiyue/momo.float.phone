@@ -3,6 +3,7 @@ import { QA_TOOLS, formatQaToolSubtitle, type QaCreatedContent, type QaProposedC
 import { loadQaGithubConfig } from "./qa-github";
 import { commitQaFiles, revertQaCommit, type QaCommitResult } from "./qa-github-write";
 import { openIndexedDbAtLeast } from "./idb-open";
+import { kvGet, kvRemove, kvSet, registerKvMigration } from "./kv-db";
 
 // ── 答疑 App 会话存储 ─────────────────────────────────
 // 模式与 mascot-chat-store 一致：裸 IndexedDB + 模块级单例 + subscribe/snapshot。
@@ -96,22 +97,32 @@ export type QaChatSnapshot = {
 };
 
 // ── 上下文预算与压缩 ──
-// 预算按字符估算（中文 ≈1 字符/角标 token 量级）。可用 localStorage
-// 键 ai_phone_qa_context_budget_chars 覆盖（调参/测试用）。
-// 单个会话的上下文预算（按字符估算）。可用 localStorage 键
+// 预算按字符估算（中文 ≈1 字符/角标 token 量级）。可用 kv 键
 // ai_phone_qa_context_budget_chars 覆盖（调参/测试用）。
 // 保持 100 万字符：工坊的主要用途就是长时间写代码、读源码，压缩太早会
 // 频繁打断工作流。卡顿的成因不在这里（同一时间也会时卡时不卡），
 // 不能靠牺牲可用上下文来换性能。
 const DEFAULT_CONTEXT_BUDGET_CHARS = 1_000_000;
 
+const QA_CONTEXT_BUDGET_KEY = "ai_phone_qa_context_budget_chars";
+// 迁进 kv-db（IndexedDB）：原先只写裸 localStorage，既无 IndexedDB 副本可恢复，
+// 又因为没在 data-management/modules 的主模块登记，被「缓存与未分类数据」整类
+// 扫走清理——用户设的预算就这么悄悄退回默认 1000000，表现为「小坊上限总是
+// 自己变回去」。registerKvMigration 负责把 localStorage 里的旧值搬进来。
+registerKvMigration(QA_CONTEXT_BUDGET_KEY);
+
 function getContextBudget(): number {
-    try {
-        const raw = Number(localStorage.getItem("ai_phone_qa_context_budget_chars"));
-        if (Number.isFinite(raw) && raw >= 2_000 && raw <= 2_000_000) return Math.floor(raw);
-    } catch {
-        // ignore
+    const stored = kvGet(QA_CONTEXT_BUDGET_KEY);
+    let rawText = stored;
+    if (rawText === null) {
+        try {
+            rawText = localStorage.getItem(QA_CONTEXT_BUDGET_KEY);
+        } catch {
+            rawText = null;
+        }
     }
+    const raw = Number(rawText);
+    if (Number.isFinite(raw) && raw >= 2_000 && raw <= 2_000_000) return Math.floor(raw);
     return DEFAULT_CONTEXT_BUDGET_CHARS;
 }
 
@@ -170,15 +181,16 @@ export function getQaContextBudgetChars(): number {
 
 /** 设置上下文预算（null = 恢复默认）；立即刷新进度条 */
 export function setQaContextBudgetChars(chars: number | null): void {
-    try {
-        if (chars == null) localStorage.removeItem("ai_phone_qa_context_budget_chars");
-        else {
-            const clamped = Math.min(QA_CONTEXT_BUDGET_MAX, Math.max(QA_CONTEXT_BUDGET_MIN, Math.floor(chars)));
-            localStorage.setItem("ai_phone_qa_context_budget_chars", String(clamped));
-        }
-    } catch {
-        // ignore
+    if (chars == null) {
+        kvRemove(QA_CONTEXT_BUDGET_KEY);
+    } else {
+        const clamped = Math.min(QA_CONTEXT_BUDGET_MAX, Math.max(QA_CONTEXT_BUDGET_MIN, Math.floor(chars)));
+        kvSet(QA_CONTEXT_BUDGET_KEY, String(clamped));
     }
+    // 这里必须走 emit()：预算改的是百分比分母，条目字符数没变，
+    // 但 snapshot.contextUsage 是「已用 / 预算」的比值，只有重算才会按新分母更新。
+    // 传 emit(true) 会直接沿用旧比值，用户保存后底部进度条纹丝不动。
+    // 设置保存是极低频操作，这一次重算完全不值得省。
     emit();
 }
 
@@ -660,10 +672,24 @@ export async function sendQaMessage(
     isGenerating = true;
     const controller = new AbortController();
     abortController = controller;
-    emit();
+    // 跳过上下文用量重算：气泡刚上屏，再对整段上下文跑一遍字符累加纯属白烧主线程
+    // （预算 100 万字符、条目上千时这一遍并不便宜）。
+    emit(true);
 
-    // 让出一帧，确保用户气泡与「生成中」状态先绘制出来。
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    // 让出一帧，确保用户气泡与「生成中」状态先绘制出来，再做请求体组装与序列化。
+    // 必须带 setTimeout 兜底：用户点完发送立刻切到后台时，iOS 会冻结
+    // requestAnimationFrame 回调，只挂 rAF 会把 sendQaMessage 永久卡在
+    // 「生成中」，回前台也发不出下一条。60ms 后无论 rAF 有没有来都往下走。
+    await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+        };
+        requestAnimationFrame(() => { setTimeout(finish, 0); });
+        setTimeout(finish, 60);
+    });
 
     try {
         // 触顶则压缩旧上下文。此时 context 里不含本轮 nextEntry，

@@ -415,10 +415,12 @@ function applyWorldInfoRegex(text: string, regexGroups: RegexConfig[], ctx?: Reg
 /**
  * 世界书条目逐条处理后拼接。
  *
- * 先逐条展开宏再 join，而不是先 join 成大字符串再整体展开：
- * 几百条世界书拼成几十万字后，只要其中一条含 {{char}}，整块都要跑全文正则，
- * 那些根本不含宏的条目被迫陪跑；逐条处理后，不含 "{{" 的条目在 expand 入口
- * 就被短路返回，零成本。
+ * 宏展开逐条做、正则整块做一次：
+ * - 宏：几百条世界书拼成几十万字后，只要其中一条含 {{char}}，整块 expand 都要
+ *   跑全文正则，不含宏的条目被迫陪跑；逐条处理时不含 "{{" 的条目在 expand 入口
+ *   就被短路返回，零成本。
+ * - 正则：反过来必须整块跑一次（官方语义即如此）。若放进逐条循环，规则遍历次数
+ *   会放大成「条目数 × 规则数」，条目一多反而比原实现更慢。
  */
 function joinWorldBookEntries(
     entries: WorldBookEntry[],
@@ -429,15 +431,17 @@ function joinWorldBookEntries(
     const out: string[] = [];
     for (const entry of entries) {
         let content = entry.content;
+        // 逐条只为借 expand 入口的 includes("{{") 短路：不含宏的条目零成本返回。
+        // 正则绝不能放进来——每条跑一次会把规则遍历次数放大成「条目数 × 规则数」，
+        // 而官方语义本来就是整块只跑一次，下面在 join 后统一处理。
         if (content.includes("{{") && engine) {
             content = postProcessTrim(engine.expand(content)).trim();
         }
-        if (regexGroups) {
-            content = applyWorldInfoRegex(content, regexGroups, regexCtx);
-        }
         out.push(content);
     }
-    return out.join("\n\n");
+    const joined = out.join("\n\n");
+    if (!joined || !regexGroups || regexGroups.length === 0) return joined;
+    return applyWorldInfoRegex(joined, regexGroups, regexCtx);
 }
 
 function getMarkerContent(
@@ -1874,14 +1878,12 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                 atDepthInjections.push({ entry, engine: bookEngine });
             });
             const renderJoined = (entries: WorldBookEntry[]): string | null => {
-                // 复用单聊版的逐条展开：先对每条单独 expand，再 join。
-                // 原来的「先 join 成几十万字大块、再整体 expand」会让 includes("{{")
-                // 短路对整块失效，几百条世界书被迫全体跑全文正则。
-                return joinWorldBookEntriesWithMacros(
-                    entries,
-                    regexes,
-                    { macroEngine: bookEngine, activeTags },
-                );
+                if (entries.length === 0) return null;
+                // 复用单聊版的逐条展开（同名函数，注意不是 joinWorldBookEntriesWithMacros：
+                // v30 改函数名时这个调用点漏改，群聊只要命中共享世界书就直接
+                // ReferenceError 把整轮生成打断，是本轮群聊闪退的直接原因之一）。
+                const sorted = [...entries].sort((a, b) => (a.insertion_order ?? 50) - (b.insertion_order ?? 50));
+                return joinWorldBookEntries(sorted, regexes, { macroEngine: bookEngine, activeTags }) || null;
             };
             const beforeText = renderJoined(activated.filter(e => isWBBeforePosition(e)));
             if (beforeText) {
@@ -1983,9 +1985,13 @@ export function assembleGroupPromptPayload(input: GroupAssemblerInput): LLMMessa
                     m.characterRelations,
                 );
                 if (markerContent) {
-                    // 与单聊一致：世界书 marker 已在 joinWorldBookEntriesWithMacros 里逐条展开，
-                    // 其余 marker（人设/记忆/关系）通常不含宏，加一层判断省掉整块全文正则。
-                    if (markerContent.includes("{{") && !MACRO_ALREADY_EXPANDED_MARKERS.has(p.identifier)) {
+                    // 与单聊一致：世界书 marker 已在 joinWorldBookEntries 里逐条展开过，
+                    // 这里必须跳过二次展开（下面按 identifier 显式判断，不引入任何常量：
+                    // 之前这里是 MACRO_ALREADY_EXPANDED_MARKERS.has(...)，那个常量在
+                    // 第 27 轮还原时已删除，群聊分支漏改，含 {{ 的人设/世界书一进来就 ReferenceError）。
+                    if (markerContent.includes("{{")
+                        && p.identifier !== "worldInfoBefore"
+                        && p.identifier !== "worldInfoAfter") {
                         markerContent = postProcessTrim(engine.expand(markerContent)).trim();
                     }
                     if (markerContent) {
