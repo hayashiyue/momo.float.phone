@@ -5354,6 +5354,54 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
         }
     };
 
+    // ── 传给 <MessageBubble> 的稳定回调 ──────────────────────────────
+    // MessageBubble 是 memo(...)，默认浅比较。流式期间每刷新一次 streamPreview
+    // 就重渲父组件，若这些属性每次都是新引用，浅比较必然失败，屏幕上所有历史气泡
+    // （内部跑 ReactMarkdown + rehypeRaw + remarkGfm 全量解析）就会逐帧重渲。
+    // 注意：14 个属性里只要有 1 个不稳定，memo 就整体失效，所以必须全部稳定。
+    //
+    // onUpdate / onSystemMessage / onActionSelect 不依赖每次渲染新建的函数，直接 useCallback。
+    // onMusicPlay / onMeetingInviteAction / onFavoriteMedia 的原函数依赖 showChatToast 等
+    // 普通函数（甚至依赖 quotingMessage 这类 state），无法靠 useCallback 稳定，
+    // 改用 useRef 代理：每次渲染把最新函数写进 ref.current，对外暴露空依赖的稳定回调。
+    // 这样原业务长函数一行都不用改，合并上游时也几乎零冲突。
+    const handleBubbleUpdate = useCallback((updated: ChatMessage) => {
+        setMessages(prev => prev.map(m => (m.id === updated.id ? updated : m)));
+    }, []);
+
+    const handleBubbleSystemMessage = useCallback((text: string) => {
+        const sysMsg = pushChatMessage({ sessionId: session.id, role: "system", content: text });
+        setMessages(prev => [...prev, sysMsg]);
+    }, [session.id]);
+
+    const handleBubbleActionSelect = useCallback((text: string) => {
+        chatTextInputRef.current?.appendText(text);
+    }, []);
+
+    const musicCardPlayRef = useRef<(title: string, artist?: string) => void>(() => {});
+    const meetingInviteActionRef = useRef<(invite: ChatMessage, action: "accept" | "decline") => void>(() => {});
+    const favoriteMediaRef = useRef<(m: ChatMessage | RenderChatMessage) => void>(() => {});
+
+    // 每次渲染把最新实现写进 ref。稳定回调只读 ref.current，因此永远拿到最新的
+    // 闭包（不会出现「收藏用的是上一轮的 session」这类过时问题），而它自身的引用恒不变。
+    musicCardPlayRef.current = handleMusicCardPlay;
+    meetingInviteActionRef.current = handleMeetingInviteAction;
+    favoriteMediaRef.current = (m) => {
+        void favoriteStoredMessages([getStoredActionMessageId(m)]);
+    };
+
+    const stableMusicCardPlay = useCallback((title: string, artist?: string) => {
+        musicCardPlayRef.current(title, artist);
+    }, []);
+
+    const stableMeetingInviteAction = useCallback((invite: ChatMessage, action: "accept" | "decline") => {
+        meetingInviteActionRef.current(invite, action);
+    }, []);
+
+    const stableFavoriteMedia = useCallback((m: ChatMessage) => {
+        favoriteMediaRef.current(m);
+    }, []);
+
     /** Reusable context menu for user/assistant bubbles */
     const renderBubbleContextMenu = (m: ChatMessage, options?: { allowMultiSelect?: boolean }) => {
         const storedMessageId = getStoredActionMessageId(m);
@@ -6571,19 +6619,12 @@ export function ChatRoom({ session, onBack, onDeleted, onUserMessageSent, contac
                                                 groupSize={session.isGroup ? (session.participantIds?.length || 0) + (session.isSpectator ? 0 : 1) : undefined}
                                                 onShowDetail={setMediaDetailMsg}
                                                 characterId={msg.senderCharacterId || session.contactId}
-                                                onFavoriteMedia={() => void favoriteStoredMessages([getStoredActionMessageId(msg)])}
-                                                onUpdate={(updated) => setMessages(prev => prev.map(m => m.id === updated.id ? updated : m))}
-                                                onSystemMessage={(text) => {
-                                                    const sysMsg = pushChatMessage({
-                                                        sessionId: session.id,
-                                                        role: "system",
-                                                        content: text,
-                                                    });
-                                                    setMessages(prev => [...prev, sysMsg]);
-                                                }}
-                                                onMusicPlay={handleMusicCardPlay}
-                                                onActionSelect={(text) => chatTextInputRef.current?.appendText(text)}
-                                                onMeetingInviteAction={handleMeetingInviteAction}
+                                                onFavoriteMedia={stableFavoriteMedia}
+                                                onUpdate={handleBubbleUpdate}
+                                                onSystemMessage={handleBubbleSystemMessage}
+                                                onMusicPlay={stableMusicCardPlay}
+                                                onActionSelect={handleBubbleActionSelect}
+                                                onMeetingInviteAction={stableMeetingInviteAction}
                                                 defaultTranslationExpanded={session.collapseBilingualTranslation !== false ? false : true}
                                             />
                                         </div>
